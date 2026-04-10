@@ -1,0 +1,224 @@
+<!-- livebook:{"file_entries":[{"name":"speech1.wav","type":"attachment"},{"name":"speech2.wav","type":"attachment"}]} -->
+
+# Audio Speech Processing in Nx
+
+```elixir
+Mix.install([
+  {:fine, "~> 0.1.6"},
+  {:nx, "~> 0.11.0"},
+  {:kino_zoetrope, "~> 0.21.0"},
+  {:kino_rewind, "~> 0.1.0"},
+  {:exla, "~> 0.11.0"},
+  {:nx_audio, "~> 0.3.1"},
+  {:kino, "~> 0.19.0"},
+  {:kino_vega_lite, "~> 0.1.13"}
+])
+```
+
+## Section
+
+```elixir
+Nx.global_default_backend(EXLA.Backend)
+```
+
+```elixir
+{:ok, {speech1, sr1}} = NxAudio.IO.load(Kino.FS.file_path("speech1.wav"), channels_first: true)
+{:ok, {speech2, sr2}} = NxAudio.IO.load(Kino.FS.file_path("speech2.wav"), channels_first: true)
+
+Nx.shape(speech1) |> IO.inspect(label: "Tensor shape")
+sr1 |> IO.inspect(label: "Sampling rate")
+
+
+Nx.shape(speech2) |> IO.inspect(label: "Tensor shape")
+sr2 |> IO.inspect(label: "Sampling rate")
+
+Kino.nothing()
+```
+
+```elixir
+defmodule Downsampler do
+  def downsample_minmax(x, target_points) do
+    n = Nx.axis_size(x, 1)
+    chunk = max(div(n, target_points), 1)
+
+    trimmed = Nx.slice_along_axis(x, 0, div(n, chunk) * chunk, axis: 1)
+
+    reshaped =
+      trimmed
+      |> Nx.reshape({:auto, chunk})
+
+    mins = Nx.reduce_min(reshaped, axes: [1])
+    maxs = Nx.reduce_max(reshaped, axes: [1])
+
+    {mins, maxs}
+  end
+end
+
+Kino.nothing()
+```
+
+```elixir
+defmodule Upsampler do
+  def upsample_linear(x, target_points) do
+    {c, n} = Nx.shape(x)
+
+    t =
+      Nx.linspace(0.0, 1.0, n: target_points)
+      |> Nx.reshape({1, target_points})
+      |> Nx.broadcast({c, target_points})
+
+    pos =
+      Nx.multiply(t, Nx.subtract(n, 1))
+
+    i0 =
+      pos
+      |> Nx.floor()
+      |> Nx.as_type(:s64)
+
+    i1 =
+      Nx.min(
+        Nx.add(i0, 1),
+        Nx.broadcast(n |> Nx.subtract(1), {c, target_points})
+      )
+
+    x_exp =
+      Nx.new_axis(x, 1)
+
+    y0 =
+      Nx.take_along_axis(
+        x_exp,
+        Nx.new_axis(i0, 0),
+        axis: 2
+      )
+      |> Nx.squeeze(axes: [1])
+
+    y1 =
+      Nx.take_along_axis(
+        x_exp,
+        Nx.new_axis(i1, 0),
+        axis: 2
+      )
+      |> Nx.squeeze(axes: [1])
+
+    frac =
+      Nx.subtract(
+        pos,
+        Nx.as_type(i0, Nx.type(pos))
+      )
+
+    Nx.add(
+      y0,
+      Nx.multiply(
+        frac,
+        Nx.subtract(y1, y0)
+      )
+    )
+  end
+end
+
+Kino.nothing()
+```
+
+```elixir
+defmodule WavePlot do
+  def plot(audios, args \\ [])
+
+  def plot(audios = [_ | _], args) do
+    width = Keyword.get(args, :width, 512)
+    height = Keyword.get(args, :height, 100)
+    padding = Keyword.get(args, :padding, 14)
+    labels = Keyword.get(args, :labels, [])
+    titel = Keyword.get(args, :titel, "Waveforms")
+    bg_color = Keyword.get(args, :background, {1, 1, 1, 1}) |> Tuple.to_list()
+    fg_color = Keyword.get(args, :foreground, {0, 0, 0, 1}) |> Tuple.to_list()
+    debug = Keyword.get(args, :debug, false)
+
+    for audio <- audios do
+      length = Nx.axis_size(audio, 1)
+
+      {min, max} =
+        if length / 2 > width do
+          audio
+        else
+          audio |> Upsampler.upsample_linear(width * 8)
+        end
+        |> Downsampler.downsample_minmax(width)
+
+      mmin =
+        Nx.min(min, Nx.subtract(max, Nx.Constants.epsilon(Nx.type(max)) |> Nx.multiply(100)))
+
+      mmax = Nx.max(max, Nx.add(min, Nx.Constants.epsilon(Nx.type(max)) |> Nx.multiply(100)))
+
+      grid =
+        Nx.concatenate([
+          Nx.iota({height + padding, 1})
+          |> Nx.divide(height)
+          |> Nx.reverse(axes: [0])
+          |> Nx.multiply(Nx.reduce_max(max)),
+          Nx.iota({height + padding, 1})
+          |> Nx.divide(height)
+          |> Nx.multiply(Nx.reduce_min(min))
+        ])
+        |> Nx.multiply(Nx.broadcast(1, Nx.shape(min)))
+
+      wave =
+        Nx.logical_and(
+          grid
+          |> Nx.greater_equal(mmin),
+          grid
+          |> Nx.less_equal(mmax)
+        )
+        |> Nx.new_axis(0)
+        |> Nx.new_axis(-1)
+
+      fg =
+        Nx.tensor(fg_color)
+        |> Nx.new_axis(0)
+        |> Nx.new_axis(0)
+        |> Nx.new_axis(0)
+        |> Nx.multiply(wave)
+
+      bg =
+        Nx.tensor(bg_color)
+        |> Nx.new_axis(0)
+        |> Nx.new_axis(0)
+        |> Nx.new_axis(0)
+        |> Nx.multiply(Nx.subtract(1, wave))
+
+      Nx.add(fg, bg)
+      |> Nx.multiply(255)
+    end
+    |> KinoZoetrope.TensorStack.new(
+      size: width,
+      legend: debug,
+      show_meta: debug,
+      labels: labels,
+      titel: titel
+    )
+  end
+
+  def plot(audio, args) do
+    plot([audio], args)
+  end
+end
+
+Kino.nothing()
+```
+
+```elixir
+[
+  speech1,
+  speech2,
+  speech1
+  |> Nx.slice_along_axis(12300, 13500 - 12300, axis: 1),
+  speech2
+  |> Nx.slice_along_axis(10250, 12000 - 10250, axis: 1)
+]
+|> WavePlot.plot(
+  labels: ["speech 1", "speech 2", "speech 1 slice", "speech 2 slice"],
+  titel: "Waveforms",
+  width: 400,
+  background: {0, 0.2, 0.5, 1},
+  foreground: {1, 1, 1, 1}
+)
+```
