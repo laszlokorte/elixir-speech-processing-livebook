@@ -28,7 +28,6 @@ Nx.global_default_backend(EXLA.Backend)
 Nx.shape(speech1) |> IO.inspect(label: "Tensor shape")
 sr1 |> IO.inspect(label: "Sampling rate")
 
-
 Nx.shape(speech2) |> IO.inspect(label: "Tensor shape")
 sr2 |> IO.inspect(label: "Sampling rate")
 
@@ -62,13 +61,10 @@ defmodule Upsampler do
   def upsample_linear(x, target_points) do
     {c, n} = Nx.shape(x)
 
-    t =
-      Nx.linspace(0.0, 1.0, n: target_points)
+    pos =
+      Nx.linspace(0.0, Nx.subtract(n, 1), n: target_points)
       |> Nx.reshape({1, target_points})
       |> Nx.broadcast({c, target_points})
-
-    pos =
-      Nx.multiply(t, Nx.subtract(n, 1))
 
     i0 =
       pos
@@ -260,23 +256,31 @@ Kino.nothing()
 ```
 
 ```elixir
+{slice1_start, slice1_end} = {12300, 13500}
+{slice2_start, slice2_end} = {10250, 12000}
+
 [
   speech1,
   speech2,
   speech1
-  |> Nx.slice_along_axis(12300, 13500 - 12300, axis: 1),
+  |> Nx.slice_along_axis(slice1_start, slice1_end - slice1_start, axis: 1),
   speech2
-  |> Nx.slice_along_axis(10250, 12000 - 10250, axis: 1)
+  |> Nx.slice_along_axis(slice2_start, slice2_end - slice2_start, axis: 1)
 ]
 |> WavePlot.plot(
-  labels: ["speech 1", "speech 2", "speech 1 slice", "speech 2 slice"],
+  labels: [
+    "speech 1 (#{sr1}Hz)",
+    "speech 2 (#{sr2}Hz)",
+    "speech 1 slice (#{slice1_start}-#{slice1_end})",
+    "speech 2 slice (#{slice2_start}-#{slice2_end})",
+  ],
   titel: "Waveforms",
   width: 400,
   background: {0, 0.2, 0.5, 1},
   foreground: {1, 1, 1, 1},
   ranges: [
-    {12300, 13500, {0.7, 0.0, 0.0, 1.0}},
-    {10250, 12000, {0.7, 0.0, 0.0, 1.0}}
+    {slice1_start, slice1_end, {0.7, 0.0, 0.0, 1.0}},
+    {slice2_start, slice2_end, {0.7, 0.0, 0.0, 1.0}}
   ]
 )
 ```
