@@ -4,35 +4,124 @@
 
 ```elixir
 Mix.install([
-  {:fine, "~> 0.1.6"},
   {:nx, "~> 0.11.0"},
   {:kino_zoetrope, "~> 0.21.0"},
   {:kino_rewind, "~> 0.1.0"},
   {:exla, "~> 0.11.0"},
-  {:nx_audio, "~> 0.3.1"},
   {:kino, "~> 0.19.0"},
   {:kino_vega_lite, "~> 0.1.13"}
 ])
 ```
 
-## Section
+## Setup
 
 ```elixir
 Nx.global_default_backend(EXLA.Backend)
 ```
 
+## Reading WAV files
+
 ```elixir
-{:ok, {speech1, sr1}} = NxAudio.IO.load(Kino.FS.file_path("speech1.wav"), channels_first: true)
-{:ok, {speech2, sr2}} = NxAudio.IO.load(Kino.FS.file_path("speech2.wav"), channels_first: true)
+defmodule SimpleWavNx do
+  import Bitwise
 
-Nx.shape(speech1) |> IO.inspect(label: "Tensor shape")
-sr1 |> IO.inspect(label: "Sampling rate")
+  def load(path) do
+    bin = File.read!(path)
 
-Nx.shape(speech2) |> IO.inspect(label: "Tensor shape")
-sr2 |> IO.inspect(label: "Sampling rate")
+    <<"RIFF", _::little-32, "WAVE", rest::binary>> = bin
+    chunks = parse_chunks(rest, %{})
+
+    fmt = Map.fetch!(chunks, "fmt ")
+    data = Map.fetch!(chunks, "data")
+
+    <<
+      audio_format::little-16,
+      channels::little-16,
+      sample_rate::little-32,
+      _byte_rate::little-32,
+      block_align::little-16,
+      bits_per_sample::little-16,
+      _::binary
+    >> = fmt
+
+    if audio_format != 1 do
+      raise "Only PCM supported (got format #{audio_format})"
+    end
+
+    tensor =
+      decode_tensor(data, bits_per_sample, channels, block_align)
+
+    %{
+      channels: channels,
+      sample_rate: sample_rate,
+      bits_per_sample: bits_per_sample,
+      samples: tensor
+    }
+  end
+
+  # ---- chunk parsing ----
+
+  defp parse_chunks(<<>>, acc), do: acc
+
+  defp parse_chunks(
+         <<id::binary-4, size::little-32, data::binary-size(size), rest::binary>>,
+         acc
+       ) do
+    rest =
+      if rem(size, 2) == 1 do
+        binary_part(rest, 1, byte_size(rest) - 1)
+      else
+        rest
+      end
+
+    parse_chunks(rest, Map.put(acc, id, data))
+  end
+
+  # ---- decoding ----
+
+  defp decode_tensor(data, 16, channels, _block_align) do
+    Nx.from_binary(data, :s16)
+    |> reshape_channels(channels)
+  end
+
+  defp decode_tensor(data, 32, channels, _block_align) do
+    Nx.from_binary(data, :s32)
+    |> reshape_channels(channels)
+  end
+
+  defp decode_tensor(data, 8, channels, _block_align) do
+    # unsigned → signed
+    Nx.from_binary(data, :u8)
+    |> Nx.subtract(128)
+    |> reshape_channels(channels)
+  end
+
+  # 24-bit: no native dtype → manual unpack
+  defp decode_tensor(data, 24, channels, _block_align) do
+    samples =
+      for <<a::8, b::8, c::signed-8 <- data>> do
+        c <<< 16 ||| b <<< 8 ||| a
+      end
+
+    Nx.tensor(samples, type: :s32)
+    |> reshape_channels(channels)
+  end
+
+  defp decode_tensor(_, bits, _, _) do
+    raise "Unsupported bit depth: #{bits}"
+  end
+
+  defp reshape_channels(tensor, channels) do
+    tensor
+    |> Nx.reshape({:auto, channels})
+    |> Nx.transpose()
+  end
+end
 
 Kino.nothing()
 ```
+
+## Helper for Downsampling and Upsampling
 
 ```elixir
 defmodule Downsampler do
@@ -114,6 +203,8 @@ end
 
 Kino.nothing()
 ```
+
+## Helper for Plotting Waveforms as Bitmaps
 
 ```elixir
 defmodule WavePlot do
@@ -254,6 +345,23 @@ end
 
 Kino.nothing()
 ```
+
+## Loading examples
+
+```elixir
+%{samples: speech1, sample_rate: sr1} = SimpleWavNx.load(Kino.FS.file_path("speech1.wav"))
+%{samples: speech2, sample_rate: sr2} = SimpleWavNx.load(Kino.FS.file_path("speech2.wav"))
+
+Nx.shape(speech1) |> IO.inspect(label: "Tensor shape")
+sr1 |> IO.inspect(label: "Sampling rate")
+
+Nx.shape(speech2) |> IO.inspect(label: "Tensor shape")
+sr2 |> IO.inspect(label: "Sampling rate")
+
+Kino.nothing()
+```
+
+## Plotting example sounds
 
 ```elixir
 {slice1_start, slice1_end} = {12300, 13500}
