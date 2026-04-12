@@ -518,5 +518,4 @@ for {title, speech, sr} <- [{"Speech 1", speech1, sr1}, {"Speech 2", speech2, sr
   |> VegaLite.encode_field(:color, "z", type: :nominal, axis: [title: "Energy Threshold"])
 end
 |> then(&VegaLite.concat(VegaLite.new(), &1, :vertical))
-|> Kino.VegaLite.new()
 ```
