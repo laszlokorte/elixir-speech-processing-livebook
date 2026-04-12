@@ -424,25 +424,25 @@ bins_half = div(freq_bins, 2)
 
 windows =
   [
-    speech2,
-    speech1
+    speech1,
+    speech2
   ]
   |> Enum.map(
     &(&1
       # |> then(fn s -> Nx.divide(s, Nx.reduce_max(s)) end)
-      |> Nx.flatten()
+      |> Nx.vectorize(:channel)
       |> Window.sliding_windows(freq_bins, freq_bins |> div(2))
       |> Nx.fft()
       |> Nx.abs()
       |> Nx.add(Nx.Constants.epsilon(:f32))
-      |> Nx.slice_along_axis(bins_half, bins_half, axis: 1)
       |> Nx.log()
       |> Nx.divide(10)
+      |> Nx.slice_along_axis(bins_half, bins_half, axis: 1)
       |> Nx.transpose()
-      |> Nx.new_axis(0))
+      |> Nx.devectorize())
   )
   |> KinoZoetrope.TensorStack.new(
-    size: 300,
+    size: 350,
     titel: "Magnitude Spectra",
     show_meta: false,
     labels: ["Speech 1", "Speech 2"],
