@@ -392,3 +392,60 @@ Kino.nothing()
   ]
 )
 ```
+
+## Window Helper
+
+```elixir
+defmodule Window do
+  def sliding_windows(t, window, step \\ 1) do
+    n = Nx.axis_size(t, 0)
+    count = div(n - window, step) + 1
+
+    starts = Nx.iota({count}) |> Nx.multiply(step)
+    starts = Nx.new_axis(starts, 1)
+
+    offsets = Nx.iota({window})
+    offsets = Nx.new_axis(offsets, 0)
+
+    indices = Nx.add(starts,  offsets)
+
+    t[indices]
+  end
+end
+
+ Kino.nothing()
+```
+
+## Plotting Spectra
+
+```elixir
+freq_bins = 512
+bins_half = div(freq_bins, 2)
+
+windows =
+  [
+    speech2,
+    speech1
+  ]
+  |> Enum.map(
+    &(&1
+      # |> then(fn s -> Nx.divide(s, Nx.reduce_max(s)) end)
+      |> Nx.flatten()
+      |> Window.sliding_windows(freq_bins, freq_bins |> div(2))
+      |> Nx.fft()
+      |> Nx.abs()
+      |> Nx.add(Nx.Constants.epsilon(:f32))
+      |> Nx.slice_along_axis(bins_half, bins_half, axis: 1)
+      |> Nx.log()
+      |> Nx.divide(10)
+      |> Nx.transpose()
+      |> Nx.new_axis(0))
+  )
+  |> KinoZoetrope.TensorStack.new(
+    size: 300,
+    titel: "Magnitude Spectra",
+    show_meta: false,
+    labels: ["Speech 1", "Speech 2"],
+    cmap: "inferno"
+  )
+```
