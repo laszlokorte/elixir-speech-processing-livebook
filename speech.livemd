@@ -400,6 +400,8 @@ Kino.nothing()
 
 ```elixir
 defmodule Window do
+  import Nx.Defn
+
   def sliding_windows(t, window, step \\ 1) do
     n = Nx.axis_size(t, 0)
     count = div(n - window, step) + 1
@@ -410,13 +412,40 @@ defmodule Window do
     offsets = Nx.iota({window})
     offsets = Nx.new_axis(offsets, 0)
 
-    indices = Nx.add(starts,  offsets)
+    indices = Nx.add(starts, offsets)
 
     t[indices]
   end
+
+  defn hann(opts \\ []) do
+    opts = keyword!(opts, [:size, cyclic: false])
+    n = opts[:size]
+    i = Nx.iota({n})
+
+    Nx.Constants.pi()
+    |> Nx.multiply(2)
+    |> Nx.multiply(i)
+    |> Nx.divide(n - if(opts[:cyclic], do: 0, else: 1))
+    |> Nx.cos()
+    |> Nx.negate()
+    |> Nx.add(1)
+    |> Nx.multiply(0.5)
+  end
 end
 
- Kino.nothing()
+Kino.nothing()
+```
+
+```elixir
+data =
+  Window.hann(size: 16, cyclic: true)
+  |> Nx.to_list()
+  |> Enum.with_index()
+  |> Enum.map(fn {y, x} -> %{x: x, y: y} end)
+  |> then(&VegaLite.data_from_values(VegaLite.new(width: 600, title: "Hann Window"), &1))
+  |> VegaLite.mark(:point, color: "red")
+  |> VegaLite.encode_field(:x, "x", type: :quantitative, axis: [title: "Sample"])
+  |> VegaLite.encode_field(:y, "y", type: :quantitative, axis: [title: "Amplitude"])
 ```
 
 ## Plotting Spectra
@@ -434,6 +463,7 @@ bins_half = div(freq_bins, 2)
     # |> then(fn s -> Nx.divide(s, Nx.reduce_max(s)) end)
     |> Nx.vectorize(:channel)
     |> Window.sliding_windows(freq_bins, freq_bins |> div(2))
+    |> Nx.multiply(Window.hann(size: freq_bins, cyclic: true))
     |> Nx.fft()
     |> Nx.abs()
     |> Nx.add(Nx.Constants.epsilon(:f32))
@@ -476,6 +506,7 @@ for {title, speech, sr} <- [{"Speech 1", speech1, sr1}, {"Speech 2", speech2, sr
     |> Nx.vectorize(:windows)
     |> Nx.new_axis(0)
     |> Nx.new_axis(0)
+    |> Nx.multiply(Window.hann(size: winsize, cyclic: true))
     |> then(&Nx.conv(Nx.concatenate([&1, &1], axis: 2), &1))
     |> Nx.squeeze(axes: [0, 1])
     |> Nx.slice_along_axis(1, div(winsize, 2), axis: 0)
