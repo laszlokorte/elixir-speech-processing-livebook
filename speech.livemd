@@ -448,84 +448,56 @@ data =
   |> VegaLite.encode_field(:y, "y", type: :quantitative, axis: [title: "Amplitude"])
 ```
 
-## Plotting Spectra
-
-```elixir
-freq_bins = 512
-bins_half = div(freq_bins, 2)
-
-[
-  speech1,
-  speech2
-]
-|> Enum.map(
-  &(&1
-    # |> then(fn s -> Nx.divide(s, Nx.reduce_max(s)) end)
-    |> Nx.vectorize(:channel)
-    |> Window.sliding_windows(freq_bins, freq_bins |> div(2))
-    |> Nx.multiply(Window.hann(size: freq_bins, cyclic: true))
-    |> Nx.fft()
-    |> Nx.abs()
-    |> Nx.add(Nx.Constants.epsilon(:f32))
-    |> Nx.log()
-    |> Nx.divide(10)
-    |> Nx.slice_along_axis(bins_half, bins_half, axis: 1)
-    |> Nx.transpose()
-    |> Nx.devectorize())
-)
-|> KinoZoetrope.TensorStack.new(
-  size: 350,
-  titel: "Magnitude Spectra",
-  show_meta: false,
-  labels: ["Speech 1", "Speech 2"],
-  cmap: "inferno"
-)
-```
-
 ## Fundamental Frequency Estimator
 
 ```elixir
 winsize_ms = 32
 
-for {title, speech, sr} <- [{"Speech 1", speech1, sr1}, {"Speech 2", speech2, sr2}] do
-  winsize = max((sr * winsize_ms) |> div(1000), 1)
+speeches = [{"Speech 1", speech1, sr1}, {"Speech 2", speech2, sr2}]
 
-  {minFreq_hz, maxFreq_hz} = {80, 400}
-  {minPeriod_s, maxPeriod_s} = {1 / maxFreq_hz, 1 / minFreq_hz}
+fundamentals =
+  for {_, speech, sr} <- speeches do
+    winsize = max((sr * winsize_ms) |> div(1000), 1)
 
-  {minSample, maxSample} = {floor(minPeriod_s * sr), ceil(maxPeriod_s * sr)}
+    {minFreq_hz, maxFreq_hz} = {80, 400}
+    {minPeriod_s, maxPeriod_s} = {1 / maxFreq_hz, 1 / minFreq_hz}
 
-  threshold = 32 / sr
+    {minSample, maxSample} = {floor(minPeriod_s * sr), ceil(maxPeriod_s * sr)}
 
-  lag =
-    speech
-    |> Nx.divide(32767)
-    |> Nx.flatten()
-    # |> then(fn s -> Nx.divide(s, Nx.reduce_max(s)) end)
-    |> Window.sliding_windows(winsize, winsize |> div(2))
-    |> Nx.vectorize(:windows)
-    |> Nx.new_axis(0)
-    |> Nx.new_axis(0)
-    |> Nx.multiply(Window.hann(size: winsize, cyclic: true))
-    |> then(&Nx.conv(Nx.concatenate([&1, &1], axis: 2), &1))
-    |> Nx.squeeze(axes: [0, 1])
-    |> Nx.slice_along_axis(1, div(winsize, 2), axis: 0)
-    |> Nx.slice_along_axis(minSample, maxSample - minSample, axis: 0)
+    lag =
+      speech
+      |> Nx.divide(32768.0)
+      |> Nx.flatten()
+      # |> then(fn s -> Nx.divide(s, Nx.reduce_max(s)) end)
+      |> Window.sliding_windows(winsize, winsize |> div(2))
+      |> Nx.vectorize(:windows)
+      |> Nx.multiply(Window.hann(size: winsize, cyclic: true))
+      |> Nx.new_axis(0)
+      |> Nx.new_axis(0)
+      |> then(&Nx.conv(Nx.concatenate([&1, &1], axis: 2), &1))
+      |> Nx.squeeze(axes: [0, 1])
+      |> Nx.slice_along_axis(minSample, maxSample, axis: 0)
 
-  fundamental =
-    lag
-    |> Nx.argmax()
-    |> Nx.add(minSample + 1)
-    |> then(&Nx.divide(sr, &1))
-    |> Nx.devectorize()
+    fundamental =
+      lag
+      |> Nx.argmax(axis: 0)
+      |> Nx.add(minSample)
+      |> Nx.devectorize()
 
-  energy =
-    lag
-    |> Nx.reduce_max()
-    |> Nx.devectorize()
+    energy =
+      lag
+      |> Nx.reduce_max()
+      |> Nx.devectorize()
+
+    {fundamental, energy}
+  end
+
+for {{fundamental, energy}, {title, _, sr}} <- fundamentals |> Enum.zip(speeches) do
+  threshold =  32 / sr
 
   data =
     fundamental
+    |> then(&Nx.divide(sr, &1))
     |> Nx.to_list()
     |> Enum.zip(Nx.to_list(energy))
     |> Enum.with_index()
@@ -538,9 +510,9 @@ for {title, speech, sr} <- [{"Speech 1", speech1, sr1}, {"Speech 2", speech2, sr
     end)
 
   VegaLite.new(
-    width: 600,
+    width: 900,
     title:
-      "Estimated Fundamental of #{title} (Median: #{Nx.to_number(Nx.median(fundamental)) |> round}Hz)"
+      "Estimated Fundamental of #{title} (Median: #{Nx.to_number(Nx.median(Nx.divide(sr, fundamental))) |> round}Hz)"
   )
   |> VegaLite.data_from_values(data)
   |> VegaLite.mark(:point)
@@ -549,4 +521,70 @@ for {title, speech, sr} <- [{"Speech 1", speech1, sr1}, {"Speech 2", speech2, sr
   |> VegaLite.encode_field(:color, "z", type: :nominal, axis: [title: "Energy Threshold"])
 end
 |> then(&VegaLite.concat(VegaLite.new(), &1, :vertical))
+```
+
+## Plotting Spectra
+
+```elixir
+for {{speech, sr}, {fundamental, energy}} <-
+      [
+        {speech1, sr1},
+        {speech2, sr2}
+      ]
+      |> Enum.zip(fundamentals) do
+  freq_bins = max((sr * winsize_ms) |> div(1000), 1)
+  bins_half = div(freq_bins, 2)
+  fundamental = Nx.devectorize(fundamental)
+  threshold = 32 / 16000
+
+  magspec =
+    speech
+    # |> then(fn s -> Nx.divide(s, Nx.reduce_max(s)) end)
+    |> Nx.vectorize(:channel)
+    |> Window.sliding_windows(freq_bins, bins_half)
+    |> Nx.multiply(Window.hann(size: freq_bins, cyclic: true))
+    |> Nx.fft()
+    |> Nx.abs()
+    |> Nx.add(Nx.Constants.epsilon(:f32))
+    |> Nx.log()
+    |> Nx.divide(10)
+    |> Nx.slice_along_axis(bins_half, bins_half, axis: 1)
+    |> Nx.transpose()
+
+  for oct <- 1..10 do
+    magspec
+    |> Nx.indexed_put(
+      Nx.stack(
+        [
+          Nx.select(
+            Nx.greater(energy, threshold),
+            256
+            |> Nx.subtract(Nx.divide(512 * oct, fundamental))
+            |> Nx.round()
+            |> Nx.as_type(:u32),
+            Nx.broadcast(0, Nx.shape(fundamental))
+          ),
+          Nx.iota(Nx.shape(fundamental))
+        ],
+        axis: 1
+      ),
+      Nx.select(
+        Nx.greater(energy, threshold),
+        Nx.broadcast(1.5, Nx.shape(fundamental)),
+        Nx.broadcast(0, Nx.shape(fundamental))
+      )
+    )
+    |> Nx.devectorize()
+  end
+  |> Nx.stack()
+  |> Nx.squeeze(axes: [1])
+end
+|> KinoZoetrope.TensorStack.new(
+  size: 350,
+  titel: "Magnitude Spectra",
+  show_meta: false,
+  labels: ["Speech 1", "Speech 2"],
+  cmap: "inferno",
+  frame_label: "Fundamental"
+)
 ```
