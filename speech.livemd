@@ -349,8 +349,11 @@ Kino.nothing()
 ## Loading examples
 
 ```elixir
-%{samples: speech1, sample_rate: sr1} = SimpleWavNx.load(Kino.FS.file_path("speech1.wav"))
-%{samples: speech2, sample_rate: sr2} = SimpleWavNx.load(Kino.FS.file_path("speech2.wav"))
+%{samples: speech1, sample_rate: sr1} =
+  SimpleWavNx.load(Kino.FS.file_path("speech1.wav")) 
+
+%{samples: speech2, sample_rate: sr2} =
+  SimpleWavNx.load(Kino.FS.file_path("speech2.wav")) 
 
 Nx.shape(speech1) |> IO.inspect(label: "Tensor shape")
 sr1 |> IO.inspect(label: "Sampling rate")
@@ -422,30 +425,98 @@ end
 freq_bins = 512
 bins_half = div(freq_bins, 2)
 
-windows =
-  [
-    speech1,
-    speech2
-  ]
-  |> Enum.map(
-    &(&1
-      # |> then(fn s -> Nx.divide(s, Nx.reduce_max(s)) end)
-      |> Nx.vectorize(:channel)
-      |> Window.sliding_windows(freq_bins, freq_bins |> div(2))
-      |> Nx.fft()
-      |> Nx.abs()
-      |> Nx.add(Nx.Constants.epsilon(:f32))
-      |> Nx.log()
-      |> Nx.divide(10)
-      |> Nx.slice_along_axis(bins_half, bins_half, axis: 1)
-      |> Nx.transpose()
-      |> Nx.devectorize())
+[
+  speech1,
+  speech2
+]
+|> Enum.map(
+  &(&1
+    # |> then(fn s -> Nx.divide(s, Nx.reduce_max(s)) end)
+    |> Nx.vectorize(:channel)
+    |> Window.sliding_windows(freq_bins, freq_bins |> div(2))
+    |> Nx.fft()
+    |> Nx.abs()
+    |> Nx.add(Nx.Constants.epsilon(:f32))
+    |> Nx.log()
+    |> Nx.divide(10)
+    |> Nx.slice_along_axis(bins_half, bins_half, axis: 1)
+    |> Nx.transpose()
+    |> Nx.devectorize())
+)
+|> KinoZoetrope.TensorStack.new(
+  size: 350,
+  titel: "Magnitude Spectra",
+  show_meta: false,
+  labels: ["Speech 1", "Speech 2"],
+  cmap: "inferno"
+)
+```
+
+## Fundamental Frequency Estimator
+
+```elixir
+winsize_ms = 32
+
+for {title, speech, sr} <- [{"Speech 1", speech1, sr1}, {"Speech 2", speech2, sr2}] do
+  winsize = max((sr * winsize_ms) |> div(1000), 1)
+
+  {minFreq_hz, maxFreq_hz} = {80, 400}
+  {minPeriod_s, maxPeriod_s} = {1 / maxFreq_hz, 1 / minFreq_hz}
+
+  {minSample, maxSample} = {floor(minPeriod_s * sr), ceil(maxPeriod_s * sr)}
+
+  threshold = 32 / sr
+
+  lag =
+    speech
+    |> Nx.divide(32767)
+    |> Nx.flatten()
+    # |> then(fn s -> Nx.divide(s, Nx.reduce_max(s)) end)
+    |> Window.sliding_windows(winsize, winsize |> div(2))
+    |> Nx.vectorize(:windows)
+    |> Nx.new_axis(0)
+    |> Nx.new_axis(0)
+    |> then(&Nx.conv(Nx.concatenate([&1, &1], axis: 2), &1))
+    |> Nx.squeeze(axes: [0, 1])
+    |> Nx.slice_along_axis(1, div(winsize, 2), axis: 0)
+    |> Nx.slice_along_axis(minSample, maxSample - minSample, axis: 0)
+
+  fundamental =
+    lag
+    |> Nx.argmax()
+    |> Nx.add(minSample + 1)
+    |> then(&Nx.divide(sr, &1))
+    |> Nx.devectorize()
+
+  energy =
+    lag
+    |> Nx.reduce_max()
+    |> Nx.devectorize()
+
+  data =
+    fundamental
+    |> Nx.to_list()
+    |> Enum.zip(Nx.to_list(energy))
+    |> Enum.with_index()
+    |> Enum.map(fn {{y, e}, x} ->
+      %{
+        x: x * winsize_ms / 1000,
+        y: y,
+        z: if(e > threshold, do: ">#{threshold}", else: "<= #{threshold}")
+      }
+    end)
+
+  VegaLite.new(
+    width: 600,
+    title:
+      "Estimated Fundamental of #{title} (Median: #{Nx.to_number(Nx.median(fundamental)) |> round}Hz)"
   )
-  |> KinoZoetrope.TensorStack.new(
-    size: 350,
-    titel: "Magnitude Spectra",
-    show_meta: false,
-    labels: ["Speech 1", "Speech 2"],
-    cmap: "inferno"
-  )
+  |> VegaLite.data_from_values(data)
+  |> VegaLite.mark(:point)
+  |> VegaLite.encode_field(:x, "x", type: :quantitative, axis: [title: "Time (s)"])
+  |> VegaLite.encode_field(:y, "y", type: :quantitative, axis: [title: "Fundamental (Hz)"])
+  |> VegaLite.encode_field(:color, "z", type: :nominal, axis: [title: "Energy Threshold"])
+end
+|> then(&VegaLite.concat(VegaLite.new(), &1, :vertical))
+|> Kino.VegaLite.new()
 ```
