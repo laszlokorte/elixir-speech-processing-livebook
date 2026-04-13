@@ -14,6 +14,11 @@ Mix.install([
 ])
 ```
 
+## Intro
+
+This Livebook acts as a short introduction to audio signal processing via Nx.
+The array-oriented programming in Nx allows to express many powerful concepts and algorithms very succinctly.
+
 ## Setup
 
 ```elixir
@@ -21,6 +26,11 @@ Nx.global_default_backend(EXLA.Backend)
 ```
 
 ## Reading WAV files
+
+To have some data to work with we will read in some example audio (wav) files. In general the `ffmpeg` library can be used to read and write audio data in various formats.
+For this Livebook we do not want to rely on such external dependencies, in order to increase the protability and make installation across a range of systems easier.
+
+So we implement a manual wav decoder that reads `.wav` file and puts the audio samples into an `Nx` array.
 
 ```elixir
 defmodule SimpleWavNx do
@@ -60,7 +70,6 @@ defmodule SimpleWavNx do
     }
   end
 
-  # ---- chunk parsing ----
 
   defp parse_chunks(<<>>, acc), do: acc
 
@@ -124,6 +133,12 @@ Kino.nothing()
 
 ## Loading examples
 
+At its core audio signals are 1-dimensional arrays of numeric sample values. 
+Each sample value represents the measured (positive or negative relative to a reference value) air pressure at a point in time. Depending on the use case and quality of the recording 16000 or up to 48000 sample values per second are required to capture and reproduce the humanly perceived sound faithfully.
+The number of recorded samples per second is called sampling rate (sr) and needs to carried around as unit of measurement along the the raw sample values.
+
+A single audio signal is just a 1d sequence of numbers but for processing stereo or surround sound with two or more channels, multiple such sequency of the same length are bundled together. Our example files contain only a single channel (mono) but we follow the convention of using 2d arrays.
+
 ```elixir
 %{samples: speech1, sample_rate: sr1} =
   SimpleWavNx.load(Kino.FS.file_path("speech1.wav"))
@@ -131,26 +146,38 @@ Kino.nothing()
 %{samples: speech2, sample_rate: sr2} =
   SimpleWavNx.load(Kino.FS.file_path("speech2.wav"))
 
-Nx.shape(speech1) |> IO.inspect(label: "Tensor shape")
-sr1 |> IO.inspect(label: "Sampling rate")
+Nx.shape(speech1) |> IO.inspect(label: "Tensor shape (channels, samples)")
+sr1 |> IO.inspect(label: "Sampling rate (Hz)")
 
-Nx.shape(speech2) |> IO.inspect(label: "Tensor shape")
-sr2 |> IO.inspect(label: "Sampling rate")
+Nx.shape(speech2) |> IO.inspect(label: "Tensor shape (channels, samples)")
+sr2 |> IO.inspect(label: "Sampling rate (Hz)")
 
 Kino.nothing()
 ```
 
 ## Plotting example sounds
 
+We can use the `KinoPhonograph.WavePlot.plot` function of the  `kino_phonograph` package to plot the amplitude of the audio signal as wave across time.
+
+Since the plotted image is only a few hundred pixels wide to fit in the screen but the audio signals contains tenthousands of samples values the exact wave form is only aproximated.
+
+But we can *zoom in* by slicing a shorter sub sequence of samples from the audio signal, to make the wave form better recognizeable.
+
 ```elixir
+# start and end positions to slice
 {slice1_start, slice1_end} = {12300, 13500}
 {slice2_start, slice2_end} = {10250, 12000}
 
+# plot 4 signals
 [
+  # the full speech1 signal 
   speech1,
+  # the full speech2 signal
   speech2,
+  # only a slice of speech1
   speech1
   |> Nx.slice_along_axis(slice1_start, slice1_end - slice1_start, axis: 1),
+  # and a slice of speech2
   speech2
   |> Nx.slice_along_axis(slice2_start, slice2_end - slice2_start, axis: 1)
 ]
@@ -166,6 +193,7 @@ Kino.nothing()
   background: {0, 0.2, 0.5, 1},
   foreground: {1, 1, 1, 1},
   ranges: [
+    # highlight the slice ranges in the first to plots
     {slice1_start, slice1_end, {0.7, 0.0, 0.0, 1.0}},
     {slice2_start, slice2_end, {0.7, 0.0, 0.0, 1.0}}
   ]
@@ -174,11 +202,18 @@ Kino.nothing()
 
 ## Window Helper
 
+A typical technique in audio signal processing is to cut a long signal into equally sized (and sometimes overlapping) parts and processing each part seperately before putting everything back together.
+This is called windowing. We define a helper function to slice a signal into multiply windows of a given length. The step size determines the distance between windows
+
 ```elixir
 defmodule Window do
   import Nx.Defn
 
-  def sliding_windows(t, window, step \\ 1) do
+  # slice signal t into windows of :size with and overlap of (:size - :step)
+  defn sliding_windows(t, args \\ []) do
+    args = keyword!(args, [:size, stride: 1])
+    window = args[:size]
+    step = args[:stride]
     n = Nx.axis_size(t, 0)
     count = div(n - window, step) + 1
 
@@ -192,8 +227,25 @@ defmodule Window do
 
     t[indices]
   end
+end
 
-  defn hann(opts \\ []) do
+Kino.nothing()
+```
+
+## Hann Window
+
+Slicing a signal into smaller pieces virtually introduces discontiniouties causing audiable artifacts. This is because slicing an array of signal values can also be regarded as setting samples outside the slice range to 0, causing an invisible sudden amplitude jump.
+
+To avoid this sudden jump the sliced signal is usually smoothed out by gradually reducing the magnitude of samples near the edge of a slice. In terms of calculations this can be done by element-wise multiplication of a signal slice with a widnow function.
+
+There are many window functions that may be used. One of them is the Hann window.
+It is constructed from pieces of `cos(x)`. Below we define a helper function to generate a Hann window of a given length.
+
+```elixir
+defmodule Hann do
+  import Nx.Defn
+  # generate a hann window of :size
+  defn window(opts \\ []) do
     opts = keyword!(opts, [:size, cyclic: false])
     n = opts[:size]
     i = Nx.iota({n})
@@ -208,13 +260,13 @@ defmodule Window do
     |> Nx.multiply(0.5)
   end
 end
-
-Kino.nothing()
 ```
+
+Lets generate and plot a Hann window. Observe how at the center the function value is 1.0 and to the edges it fades to 0. But also notic how the values are not quite symmetric. The left most value is 0.0 but the right most value is not. This is intentional for allowing the window to be tiled periodically.
 
 ```elixir
 data =
-  Window.hann(size: 16, cyclic: true)
+  Hann.window(size: 16, cyclic: true)
   |> Nx.to_list()
   |> Enum.with_index()
   |> Enum.map(fn {y, x} -> %{x: x, y: y} end)
@@ -226,6 +278,11 @@ data =
 
 ## Fundamental Frequency Estimator
 
+With everything prepared we can now do our first actual calculation to analyse our audio data.
+With the assumtion that the audio files contain spoken language we can try to extract the speakers voice fundamental frequency.
+
+We cut each signal into slices of 32ms length. The audio file sample rate is used to determine the number of samples that correspond to a time duration of 32ms.
+
 ```elixir
 winsize_ms = 32
 
@@ -234,32 +291,51 @@ speeches = [{"Speech 1", speech1, sr1}, {"Speech 2", speech2, sr2}]
 fundamentals =
   for {_, speech, sr} <- speeches do
     threshold = 32 / sr
+
+    # convert milliseconds to number of samples
     winsize = max((sr * winsize_ms) |> div(1000), 1)
 
+    # we assume human voice to have a fundamental frequency of between 80 Hz and 400 Hz
     {minFreq_hz, maxFreq_hz} = {80, 400}
+    # the period lengths corresponding to the frequencies
     {minPeriod_s, maxPeriod_s} = {1 / maxFreq_hz, 1 / minFreq_hz}
 
+    # convert period lengths from ms to number of samples
     {minSample, maxSample} = {floor(minPeriod_s * sr), ceil(maxPeriod_s * sr)}
 
     lag =
       speech
+
+      # normalize sample values to be between -1.0 and 1.0
       |> Nx.divide(32768.0)
+      # discard channels
       |> Nx.flatten()
-      |> Window.sliding_windows(winsize, winsize |> div(2))
+      # slice signal into overlapping windows
+      |> Window.sliding_windows(size: winsize, stride: winsize |> div(2))
+      # process each window on its own
       |> Nx.vectorize(:windows)
-      |> Nx.multiply(Window.hann(size: winsize, cyclic: true))
+      # weight window with Hann 
+      |> Nx.multiply(Hann.window(size: winsize, cyclic: true))
+      # introduce extra axes required to to Nx convolution
       |> Nx.new_axis(0)
       |> Nx.new_axis(0)
+      # calculate auto correlation of each window
       |> then(&Nx.conv(Nx.concatenate([&1, &1], axis: 2), &1))
+      # remove artificial axes introduced before
       |> Nx.squeeze(axes: [0, 1])
+      # discard result values outside expected frequency range
       |> Nx.slice_along_axis(minSample, maxSample, axis: 0)
 
+    # for each window find the bin with the largest resulting value
     fundamental =
       lag
       |> Nx.argmax(axis: 0)
+      # correct index for previous slicing
       |> Nx.add(minSample)
+      # collect all window results
       |> Nx.devectorize()
 
+    # for each window find maximum result (value, not index)
     energy =
       lag
       |> Nx.reduce_max()
@@ -286,7 +362,7 @@ for {{fundamental, _energy, strong}, {title, _, sr}} <- fundamentals |> Enum.zip
     end)
 
   VegaLite.new(
-    width: 900,
+    width: 700,
     title:
       "Estimated Fundamental of #{title} (Median: #{Nx.to_number(Nx.median(Nx.divide(sr, fundamental))) |> round}Hz)"
   )
@@ -312,8 +388,8 @@ for {speech, sr} <-
 
   speech
   |> Nx.vectorize(:channel)
-  |> Window.sliding_windows(freq_bins, bins_half)
-  |> Nx.multiply(Window.hann(size: freq_bins, cyclic: true))
+  |> Window.sliding_windows(size: freq_bins, stride: bins_half)
+  |> Nx.multiply(Hann.window(size: freq_bins, cyclic: true))
   |> Nx.fft()
   |> Nx.abs()
   |> Nx.add(Nx.Constants.epsilon(:f32))
@@ -364,7 +440,7 @@ fundamentals =
     windows =
       speech
       |> Nx.flatten()
-      |> Window.sliding_windows(winsize, winsize |> div(2))
+      |> Window.sliding_windows(size: winsize, stride: winsize |> div(2))
       |> Nx.vectorize(:windows)
 
     windows
