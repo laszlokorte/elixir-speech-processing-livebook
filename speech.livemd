@@ -9,7 +9,8 @@ Mix.install([
   {:kino_rewind, "~> 0.1.0"},
   {:exla, "~> 0.11.0"},
   {:kino, "~> 0.19.0"},
-  {:kino_vega_lite, "~> 0.1.13"}
+  {:kino_vega_lite, "~> 0.1.13"},
+  {:kino_phonograph, "~> 0.2.0"}
 ])
 ```
 
@@ -121,231 +122,6 @@ end
 Kino.nothing()
 ```
 
-## Helper for Downsampling and Upsampling
-
-```elixir
-defmodule Downsampler do
-  def downsample_minmax(x, target_points) do
-    n = Nx.axis_size(x, 1)
-    chunk = max(div(n, target_points), 1)
-
-    trimmed = Nx.slice_along_axis(x, 0, div(n, chunk) * chunk, axis: 1)
-
-    reshaped =
-      trimmed
-      |> Nx.reshape({:auto, chunk})
-
-    mins = Nx.reduce_min(reshaped, axes: [1])
-    maxs = Nx.reduce_max(reshaped, axes: [1])
-
-    {mins, maxs}
-  end
-end
-
-Kino.nothing()
-```
-
-```elixir
-defmodule Upsampler do
-  def upsample_linear(x, target_points) do
-    {c, n} = Nx.shape(x)
-
-    pos =
-      Nx.linspace(0.0, Nx.subtract(n, 1), n: target_points)
-      |> Nx.reshape({1, target_points})
-      |> Nx.broadcast({c, target_points})
-
-    i0 =
-      pos
-      |> Nx.floor()
-      |> Nx.as_type(:s64)
-
-    i1 =
-      Nx.min(
-        Nx.add(i0, 1),
-        Nx.broadcast(n |> Nx.subtract(1), {c, target_points})
-      )
-
-    x_exp =
-      Nx.new_axis(x, 1)
-
-    y0 =
-      Nx.take_along_axis(
-        x_exp,
-        Nx.new_axis(i0, 0),
-        axis: 2
-      )
-      |> Nx.squeeze(axes: [1])
-
-    y1 =
-      Nx.take_along_axis(
-        x_exp,
-        Nx.new_axis(i1, 0),
-        axis: 2
-      )
-      |> Nx.squeeze(axes: [1])
-
-    frac =
-      Nx.subtract(
-        pos,
-        Nx.as_type(i0, Nx.type(pos))
-      )
-
-    Nx.add(
-      y0,
-      Nx.multiply(
-        frac,
-        Nx.subtract(y1, y0)
-      )
-    )
-  end
-end
-
-Kino.nothing()
-```
-
-## Helper for Plotting Waveforms as Bitmaps
-
-```elixir
-defmodule WavePlot do
-  defp roll(nx, shift, axis) do
-    n = Nx.axis_size(nx, axis)
-
-    shift =
-      rem(
-        shift + n,
-        n
-      )
-
-    left =
-      Nx.slice_along_axis(nx, 0, n - shift, axis: axis)
-
-    right =
-      Nx.slice_along_axis(nx, n - shift, shift, axis: axis)
-
-    Nx.concatenate([right, left], axis: axis)
-  end
-
-  def plot(audios, args \\ [])
-
-  def plot(audios = [_ | _], args) do
-    width = Keyword.get(args, :width, 512)
-    height = Keyword.get(args, :height, 100)
-    padding = Keyword.get(args, :padding, 14)
-    labels = Keyword.get(args, :labels, [])
-    titel = Keyword.get(args, :titel, "Waveforms")
-    bg_color = Keyword.get(args, :background, {1, 1, 1, 1}) |> Tuple.to_list()
-    fg_color = Keyword.get(args, :foreground, {0, 0, 0, 1}) |> Tuple.to_list()
-    debug = Keyword.get(args, :debug, false)
-    ranges = Keyword.get(args, :ranges, [])
-
-    for {audio, ai} <- audios |> Enum.with_index() do
-      length = Nx.axis_size(audio, 1)
-      {range_start, range_end, range_color} = ranges |> Enum.at(ai, {0, 0, {0, 0, 0, 0}})
-
-      {min, max} =
-        if length / 2 > width do
-          audio
-        else
-          audio |> Upsampler.upsample_linear(width * 8)
-        end
-        |> Downsampler.downsample_minmax(width)
-
-      scale = width / length
-
-      min_left = roll(min, 1, 0)
-      min_right = roll(min, -1, 0)
-
-      max_left = roll(min, 1, 0)
-      max_right = roll(min, -1, 0)
-
-      mmin =
-        min
-        |> Nx.min(Nx.add(min_left, max_left) |> Nx.multiply(0.25))
-        |> Nx.min(Nx.add(min_right, max_right) |> Nx.multiply(0.25))
-
-      mmax =
-        max
-        |> Nx.max(Nx.add(min_left, max_left) |> Nx.multiply(0.25))
-        |> Nx.max(Nx.add(min_right, max_right) |> Nx.multiply(0.25))
-
-      grid =
-        Nx.concatenate([
-          Nx.iota({height + padding, 1})
-          |> Nx.divide(height)
-          |> Nx.reverse(axes: [0])
-          |> Nx.multiply(Nx.reduce_max(max)),
-          Nx.iota({height + padding, 1})
-          |> Nx.divide(height)
-          |> Nx.multiply(Nx.reduce_min(min))
-        ])
-        |> Nx.multiply(Nx.broadcast(1, Nx.shape(min)))
-
-      wave =
-        Nx.logical_and(
-          grid
-          |> Nx.greater_equal(mmin),
-          grid
-          |> Nx.less_equal(mmax)
-        )
-        |> Nx.new_axis(0)
-        |> Nx.new_axis(-1)
-
-      time =
-        Nx.iota({Nx.axis_size(wave, 2)})
-
-      marked =
-        Nx.tensor(
-          range_color
-          |> Tuple.to_list()
-        )
-        |> Nx.new_axis(0)
-        |> Nx.new_axis(0)
-        |> Nx.new_axis(0)
-        |> Nx.multiply(
-          Nx.logical_and(
-            time |> Nx.less_equal(range_end * scale),
-            time |> Nx.greater_equal(range_start * scale)
-          )
-          |> Nx.new_axis(-1)
-          |> Nx.new_axis(0)
-        )
-
-      fg =
-        Nx.tensor(fg_color)
-        |> Nx.new_axis(0)
-        |> Nx.new_axis(0)
-        |> Nx.new_axis(0)
-        |> Nx.multiply(wave)
-
-      bg =
-        Nx.tensor(bg_color)
-        |> Nx.new_axis(0)
-        |> Nx.new_axis(0)
-        |> Nx.new_axis(0)
-        |> Nx.add(marked)
-        |> Nx.multiply(Nx.subtract(1, wave))
-
-      Nx.add(fg, bg)
-      |> Nx.multiply(255)
-    end
-    |> KinoZoetrope.TensorStack.new(
-      size: width,
-      legend: debug,
-      show_meta: debug,
-      labels: labels,
-      titel: titel
-    )
-  end
-
-  def plot(audio, args) do
-    plot([audio], args)
-  end
-end
-
-Kino.nothing()
-```
-
 ## Loading examples
 
 ```elixir
@@ -378,7 +154,7 @@ Kino.nothing()
   speech2
   |> Nx.slice_along_axis(slice2_start, slice2_end - slice2_start, axis: 1)
 ]
-|> WavePlot.plot(
+|> KinoPhonograph.WavePlot.plot(
   labels: [
     "speech 1 (#{sr1}Hz)",
     "speech 2 (#{sr2}Hz)",
@@ -612,7 +388,7 @@ for {crossings, {title, _, _}} <- fundamentals |> Enum.zip(speeches) do
       %{
         x: x * winsize_ms / 1000,
         y: c,
-        z: if(c < 0.21, do: "Voiced", else: "Unvoiced")
+        z: if(c < 0.2, do: "Voiced", else: "Unvoiced")
       }
     end)
 
@@ -623,7 +399,7 @@ for {crossings, {title, _, _}} <- fundamentals |> Enum.zip(speeches) do
   |> VegaLite.data_from_values(data)
   |> VegaLite.mark(:point)
   |> VegaLite.encode_field(:x, "x", type: :quantitative, axis: [title: "Time (s)"])
-  |> VegaLite.encode_field(:y, "y", type: :quantitative, axis: [title: "Fundamental (Hz)"])
+  |> VegaLite.encode_field(:y, "y", type: :quantitative, axis: [title: "Average number of crossings per sample"])
   |> VegaLite.encode_field(:color, "z", type: :nominal, axis: [title: "Voiced"])
 end
 |> then(&VegaLite.concat(VegaLite.new(), &1, :vertical))
