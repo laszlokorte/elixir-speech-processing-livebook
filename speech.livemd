@@ -469,7 +469,6 @@ fundamentals =
       speech
       |> Nx.divide(32768.0)
       |> Nx.flatten()
-      # |> then(fn s -> Nx.divide(s, Nx.reduce_max(s)) end)
       |> Window.sliding_windows(winsize, winsize |> div(2))
       |> Nx.vectorize(:windows)
       |> Nx.multiply(Window.hann(size: winsize, cyclic: true))
@@ -573,4 +572,59 @@ end
       }
     end
 )
+```
+
+## Zero Crossings
+
+```elixir
+winsize_ms = 32
+
+speeches = [{"Speech 1", speech1, sr1}, {"Speech 2", speech2, sr2}]
+
+fundamentals =
+  for {_, speech, sr} <- speeches do
+    winsize = max((sr * winsize_ms) |> div(1000), 1)
+
+    windows =
+      speech
+      |> Nx.flatten()
+      |> Window.sliding_windows(winsize, winsize |> div(2))
+      |> Nx.vectorize(:windows)
+
+    windows
+    |> Nx.sign()
+    |> then(
+      &Nx.not_equal(
+        Nx.slice_along_axis(&1, 1, Nx.axis_size(&1, 0) - 1, axis: 0),
+        Nx.slice_along_axis(&1, 0, Nx.axis_size(&1, 0) - 1, axis: 0)
+      )
+    )
+    |> Nx.mean()
+    |> Nx.devectorize()
+  end
+
+for {crossings, {title, _, _}} <- fundamentals |> Enum.zip(speeches) do
+  data =
+    crossings
+    |> Nx.to_list()
+    |> Enum.with_index()
+    |> Enum.map(fn {c, x} ->
+      %{
+        x: x * winsize_ms / 1000,
+        y: c,
+        z: if(c < 0.21, do: "Voiced", else: "Unvoiced")
+      }
+    end)
+
+  VegaLite.new(
+    width: 700,
+    title: "Zero-Crossings of #{title}"
+  )
+  |> VegaLite.data_from_values(data)
+  |> VegaLite.mark(:point)
+  |> VegaLite.encode_field(:x, "x", type: :quantitative, axis: [title: "Time (s)"])
+  |> VegaLite.encode_field(:y, "y", type: :quantitative, axis: [title: "Fundamental (Hz)"])
+  |> VegaLite.encode_field(:color, "z", type: :nominal, axis: [title: "Voiced"])
+end
+|> then(&VegaLite.concat(VegaLite.new(), &1, :vertical))
 ```
