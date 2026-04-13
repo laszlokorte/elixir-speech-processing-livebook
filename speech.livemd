@@ -283,6 +283,8 @@ With the assumtion that the audio files contain spoken language we can try to ex
 
 We cut each signal into slices of 32ms length. The audio file sample rate is used to determine the number of samples that correspond to a time duration of 32ms.
 
+The core idea is to auto-correleate each window slice with its self to find its fundamental frequency.
+
 ```elixir
 winsize_ms = 32
 
@@ -309,7 +311,7 @@ fundamentals =
       # normalize sample values to be between -1.0 and 1.0
       |> Nx.divide(32768.0)
       # discard channels
-      |> Nx.flatten()
+      |> Nx.sum(axes: [0])
       # slice signal into overlapping windows
       |> Window.sliding_windows(size: winsize, stride: winsize |> div(2))
       # process each window on its own
@@ -361,21 +363,31 @@ for {{fundamental, _energy, strong}, {title, _, sr}} <- fundamentals |> Enum.zip
       }
     end)
 
+  mean_fundamental =
+    Nx.to_number(
+      Nx.divide(sr, Nx.divide(Nx.sum(Nx.multiply(fundamental, strong)), Nx.sum(strong)))
+    )
+    |> round
+
   VegaLite.new(
     width: 700,
-    title:
-      "Estimated Fundamental of #{title} (Median: #{Nx.to_number(Nx.median(Nx.divide(sr, fundamental))) |> round}Hz)"
+    title: "Estimated Fundamental of #{title} (Thresholded Mean: #{mean_fundamental}Hz)"
   )
   |> VegaLite.data_from_values(data)
   |> VegaLite.mark(:point)
   |> VegaLite.encode_field(:x, "x", type: :quantitative, axis: [title: "Time (s)"])
   |> VegaLite.encode_field(:y, "y", type: :quantitative, axis: [title: "Fundamental (Hz)"])
   |> VegaLite.encode_field(:color, "z", type: :nominal, axis: [title: "Energy Threshold"])
+  |> VegaLite.encode_field(:size, "z", type: :nominal, axis: [title: "Energy Threshold"])
 end
 |> then(&VegaLite.concat(VegaLite.new(), &1, :vertical))
 ```
 
 ## Plotting Spectra
+
+Instead of just estimating the fundamental frequency of each window we can extract all frequencies of all windows via discrete (fast) fourier transform. This is called short time fourier transform because the fourier transform is applied not to the whole signal at once but to short time slices (our windows).
+
+The overall structure looks similar to before but instead of auto correlation we apply the FFT.
 
 ```elixir
 for {speech, sr} <-
@@ -387,15 +399,25 @@ for {speech, sr} <-
   bins_half = div(freq_bins, 2)
 
   speech
+  # process each channel separately
   |> Nx.vectorize(:channel)
+  # slice into windows
   |> Window.sliding_windows(size: freq_bins, stride: bins_half)
+  # weight windows via hann window
   |> Nx.multiply(Hann.window(size: freq_bins, cyclic: true))
+  # apply fourier transform to each window
   |> Nx.fft()
+  # discard phase information
   |> Nx.abs()
+  # make sure values are non-zero
   |> Nx.add(Nx.Constants.epsilon(:f32))
+  # apply logarithm
   |> Nx.log()
+  # convert to deci bel
   |> Nx.divide(10)
+  # spectrum of real values signal is symmetric, discard one half 
   |> Nx.slice_along_axis(bins_half, bins_half, axis: 1)
+  # transpose for plotting
   |> Nx.transpose()
   |> Nx.devectorize()
 end
@@ -406,6 +428,8 @@ end
   labels: ["Speech 1", "Speech 2"],
   cmap: "inferno",
   frame_label: "Fundamental",
+
+  # draw estimated fundamental frequencies as overlay into figure
   markers:
     for {{f, _e, s}, fi} <- fundamentals |> Enum.with_index(),
         {{ff, 1}, ffi} <- Enum.zip(Nx.to_list(f), Nx.to_list(s)) |> Enum.with_index() do
@@ -427,6 +451,13 @@ end
 ```
 
 ## Zero Crossings
+
+In spoken languages there are voiced sounds and unvoiced sounds (similar to vocals and consonants).
+In the spectrograms above you can see that are parts with a clear ripple pattern (discrete multiples of the fundamental frequencies) and parts without.
+
+The ripple patterns signify that the sound is voiced (ie has a fundamental frequency) whereas the sounds without the visible ripples are unvoiced (ie more noise like).
+
+We want to detect for each window if it contains a voiced or unvoiced sound.
 
 ```elixir
 winsize_ms = 32
@@ -475,7 +506,10 @@ for {crossings, {title, _, _}} <- fundamentals |> Enum.zip(speeches) do
   |> VegaLite.data_from_values(data)
   |> VegaLite.mark(:point)
   |> VegaLite.encode_field(:x, "x", type: :quantitative, axis: [title: "Time (s)"])
-  |> VegaLite.encode_field(:y, "y", type: :quantitative, axis: [title: "Average number of crossings per sample"])
+  |> VegaLite.encode_field(:y, "y",
+    type: :quantitative,
+    axis: [title: "Average number of crossings per sample"]
+  )
   |> VegaLite.encode_field(:color, "z", type: :nominal, axis: [title: "Voiced"])
 end
 |> then(&VegaLite.concat(VegaLite.new(), &1, :vertical))
