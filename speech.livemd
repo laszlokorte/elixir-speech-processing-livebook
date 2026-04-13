@@ -350,10 +350,10 @@ Kino.nothing()
 
 ```elixir
 %{samples: speech1, sample_rate: sr1} =
-  SimpleWavNx.load(Kino.FS.file_path("speech1.wav")) 
+  SimpleWavNx.load(Kino.FS.file_path("speech1.wav"))
 
 %{samples: speech2, sample_rate: sr2} =
-  SimpleWavNx.load(Kino.FS.file_path("speech2.wav")) 
+  SimpleWavNx.load(Kino.FS.file_path("speech2.wav"))
 
 Nx.shape(speech1) |> IO.inspect(label: "Tensor shape")
 sr1 |> IO.inspect(label: "Sampling rate")
@@ -383,7 +383,7 @@ Kino.nothing()
     "speech 1 (#{sr1}Hz)",
     "speech 2 (#{sr2}Hz)",
     "speech 1 slice (#{slice1_start}-#{slice1_end})",
-    "speech 2 slice (#{slice2_start}-#{slice2_end})",
+    "speech 2 slice (#{slice2_start}-#{slice2_end})"
   ],
   titel: "Waveforms",
   width: 400,
@@ -457,6 +457,7 @@ speeches = [{"Speech 1", speech1, sr1}, {"Speech 2", speech2, sr2}]
 
 fundamentals =
   for {_, speech, sr} <- speeches do
+    threshold = 32 / sr
     winsize = max((sr * winsize_ms) |> div(1000), 1)
 
     {minFreq_hz, maxFreq_hz} = {80, 400}
@@ -489,23 +490,23 @@ fundamentals =
       |> Nx.reduce_max()
       |> Nx.devectorize()
 
-    {fundamental, energy}
+    {fundamental, energy, Nx.greater_equal(energy, threshold)}
   end
 
-for {{fundamental, energy}, {title, _, sr}} <- fundamentals |> Enum.zip(speeches) do
-  threshold =  32 / sr
+for {{fundamental, _energy, strong}, {title, _, sr}} <- fundamentals |> Enum.zip(speeches) do
+  threshold = 32 / sr
 
   data =
     fundamental
     |> then(&Nx.divide(sr, &1))
     |> Nx.to_list()
-    |> Enum.zip(Nx.to_list(energy))
+    |> Enum.zip(Nx.to_list(strong))
     |> Enum.with_index()
-    |> Enum.map(fn {{y, e}, x} ->
+    |> Enum.map(fn {{y, s}, x} ->
       %{
         x: x * winsize_ms / 1000,
         y: y,
-        z: if(e > threshold, do: ">#{threshold}", else: "<= #{threshold}")
+        z: if(s > 0, do: ">#{threshold}", else: "<= #{threshold}")
       }
     end)
 
@@ -526,58 +527,26 @@ end
 ## Plotting Spectra
 
 ```elixir
-for {{speech, sr}, {fundamental, energy}} <-
+for {speech, sr} <-
       [
         {speech1, sr1},
         {speech2, sr2}
-      ]
-      |> Enum.zip(fundamentals) do
+      ] do
   freq_bins = max((sr * winsize_ms) |> div(1000), 1)
   bins_half = div(freq_bins, 2)
-  fundamental = Nx.devectorize(fundamental)
-  threshold = 32 / 16000
 
-  magspec =
-    speech
-    # |> then(fn s -> Nx.divide(s, Nx.reduce_max(s)) end)
-    |> Nx.vectorize(:channel)
-    |> Window.sliding_windows(freq_bins, bins_half)
-    |> Nx.multiply(Window.hann(size: freq_bins, cyclic: true))
-    |> Nx.fft()
-    |> Nx.abs()
-    |> Nx.add(Nx.Constants.epsilon(:f32))
-    |> Nx.log()
-    |> Nx.divide(10)
-    |> Nx.slice_along_axis(bins_half, bins_half, axis: 1)
-    |> Nx.transpose()
-
-  for oct <- 1..10 do
-    magspec
-    |> Nx.indexed_put(
-      Nx.stack(
-        [
-          Nx.select(
-            Nx.greater(energy, threshold),
-            256
-            |> Nx.subtract(Nx.divide(512 * oct, fundamental))
-            |> Nx.round()
-            |> Nx.as_type(:u32),
-            Nx.broadcast(0, Nx.shape(fundamental))
-          ),
-          Nx.iota(Nx.shape(fundamental))
-        ],
-        axis: 1
-      ),
-      Nx.select(
-        Nx.greater(energy, threshold),
-        Nx.broadcast(1.5, Nx.shape(fundamental)),
-        Nx.broadcast(0, Nx.shape(fundamental))
-      )
-    )
-    |> Nx.devectorize()
-  end
-  |> Nx.stack()
-  |> Nx.squeeze(axes: [1])
+  speech
+  |> Nx.vectorize(:channel)
+  |> Window.sliding_windows(freq_bins, bins_half)
+  |> Nx.multiply(Window.hann(size: freq_bins, cyclic: true))
+  |> Nx.fft()
+  |> Nx.abs()
+  |> Nx.add(Nx.Constants.epsilon(:f32))
+  |> Nx.log()
+  |> Nx.divide(10)
+  |> Nx.slice_along_axis(bins_half, bins_half, axis: 1)
+  |> Nx.transpose()
+  |> Nx.devectorize()
 end
 |> KinoZoetrope.TensorStack.new(
   size: 350,
@@ -585,6 +554,23 @@ end
   show_meta: false,
   labels: ["Speech 1", "Speech 2"],
   cmap: "inferno",
-  frame_label: "Fundamental"
+  frame_label: "Fundamental",
+  markers:
+    for {{f, _e, s}, fi} <- fundamentals |> Enum.with_index(),
+        {{ff, 1}, ffi} <- Enum.zip(Nx.to_list(f), Nx.to_list(s)) |> Enum.with_index() do
+      %{
+        attrs: %{
+          fill: "white",
+          width: 3,
+          height: 3,
+          stroke: "rebeccapurple",
+          rx: 3,
+          ry: 4,
+          transform: "translate(-1,-1)"
+        },
+        for: [fi],
+        points: for(oct <- 1..15, do: {ffi, 256 - 512 * oct / ff})
+      }
+    end
 )
 ```
