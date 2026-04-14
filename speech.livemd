@@ -581,3 +581,71 @@ end
   ]
 )
 ```
+
+## Time-Domain Windows
+
+```elixir
+hann = Hann.window(size: 512)
+
+for {title, speech, _} <- speeches do
+  windows =
+    speech[0]
+    |> Nx.divide(3276.0)
+    |> Window.sliding_windows(size: 512, stride: 256)
+
+  damped = windows |> Nx.multiply(hann) |> Nx.to_list()
+
+  data =
+    windows
+    |> Nx.to_list()
+    |> Enum.zip(damped)
+    |> Enum.with_index()
+    |> Enum.flat_map(fn {{window, dwin}, w} ->
+      window
+      |> Enum.zip(dwin)
+      |> Enum.with_index()
+      |> Enum.flat_map(fn {{a, b}, c} ->
+        [
+          %{
+            x: c,
+            y: a,
+            window: w,
+            color: "original"
+          },
+          %{
+            x: c,
+            y: b,
+            window: w,
+            color: "hann-scaled"
+          }
+        ]
+      end)
+    end)
+
+  VegaLite.new(
+    width: 700,
+    title: "Spectrum of Window Slice: #{title}"
+  )
+  |> VegaLite.data_from_values(data)
+  |> VegaLite.mark(:line)
+  |> VegaLite.encode_field(:color, "color", type: :nominal, scale: [range: ["red", "blue"]])
+  |> VegaLite.encode_field(:x, "x", type: :quantitative, axis: [title: "Freq (hz)"])
+  |> VegaLite.encode_field(:y, "y",
+    type: :quantitative,
+    scale: [domain: [-1, 1]],
+    axis: [title: "Amplitude"]
+  )
+  |> VegaLite.transform(filter: "datum.window == window")
+end
+|> then(&VegaLite.concat(VegaLite.new(title: "Spectra"), &1, :vertical))
+|> VegaLite.param("window",
+  value: 0,
+  bind: [
+    name: "Window",
+    input: :range,
+    min: 0,
+    max: Enum.map(spectograms, &(Nx.to_number(Nx.axis_size(&1, 2)) - 1)) |> Enum.min(),
+    step: 1
+  ]
+)
+```
