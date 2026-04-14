@@ -390,37 +390,40 @@ Instead of just estimating the fundamental frequency of each window we can extra
 The overall structure looks similar to before but instead of auto correlation we apply the FFT.
 
 ```elixir
-for {speech, sr} <-
-      [
-        {speech1, sr1},
-        {speech2, sr2}
-      ] do
-  freq_bins = max((sr * winsize_ms) |> div(1000), 1)
-  bins_half = div(freq_bins, 2)
+spectograms =
+  for {speech, sr} <-
+        [
+          {speech1, sr1},
+          {speech2, sr2}
+        ] do
+    freq_bins = max((sr * winsize_ms) |> div(1000), 1)
+    bins_half = div(freq_bins, 2)
 
-  speech
-  # process each channel separately
-  |> Nx.vectorize(:channel)
-  # slice into windows
-  |> Window.sliding_windows(size: freq_bins, stride: bins_half)
-  # weight windows via hann window
-  |> Nx.multiply(Hann.window(size: freq_bins, cyclic: true))
-  # apply fourier transform to each window
-  |> Nx.fft()
-  # discard phase information
-  |> Nx.abs()
-  # make sure values are non-zero
-  |> Nx.add(Nx.Constants.epsilon(:f32))
-  # apply logarithm
-  |> Nx.log()
-  # convert to deci bel
-  |> Nx.divide(10)
-  # spectrum of real values signal is symmetric, discard one half 
-  |> Nx.slice_along_axis(bins_half, bins_half, axis: 1)
-  # transpose for plotting
-  |> Nx.transpose()
-  |> Nx.devectorize()
-end
+    speech
+    # process each channel separately
+    |> Nx.vectorize(:channel)
+    # slice into windows
+    |> Window.sliding_windows(size: freq_bins, stride: bins_half)
+    # weight windows via hann window
+    |> Nx.multiply(Hann.window(size: freq_bins, cyclic: true))
+    # apply fourier transform to each window
+    |> Nx.fft()
+    # discard phase information
+    |> Nx.abs()
+    # make sure values are non-zero
+    |> Nx.add(Nx.Constants.epsilon(:f32))
+    # apply logarithm
+    |> Nx.log()
+    # convert to deci bel
+    |> Nx.divide(10)
+    # spectrum of real values signal is symmetric, discard one half 
+    |> Nx.slice_along_axis(bins_half, bins_half, axis: 1)
+    # transpose for plotting
+    |> Nx.transpose()
+    |> Nx.devectorize()
+  end
+
+spectograms
 |> KinoZoetrope.TensorStack.new(
   size: 350,
   titel: "Magnitude Spectra",
@@ -453,7 +456,7 @@ end
 ## Zero Crossings
 
 In spoken languages there are voiced sounds and unvoiced sounds (similar to vocals and consonants).
-In the spectrograms above you can see that are parts with a clear ripple pattern (discrete multiples of the fundamental frequencies) and parts without.
+In the spectograms above you can see that are parts with a clear ripple pattern (discrete multiples of the fundamental frequencies) and parts without.
 
 The ripple patterns signify that the sound is voiced (ie has a fundamental frequency) whereas the sounds without the visible ripples are unvoiced (ie more noise like).
 
@@ -464,7 +467,7 @@ winsize_ms = 32
 
 speeches = [{"Speech 1", speech1, sr1}, {"Speech 2", speech2, sr2}]
 
-fundamentals =
+zero_crossings =
   for {_, speech, sr} <- speeches do
     winsize = max((sr * winsize_ms) |> div(1000), 1)
 
@@ -486,7 +489,7 @@ fundamentals =
     |> Nx.devectorize()
   end
 
-for {crossings, {title, _, _}} <- fundamentals |> Enum.zip(speeches) do
+for {crossings, {title, _, _}} <- zero_crossings |> Enum.zip(speeches) do
   data =
     crossings
     |> Nx.to_list()
@@ -513,4 +516,20 @@ for {crossings, {title, _, _}} <- fundamentals |> Enum.zip(speeches) do
   |> VegaLite.encode_field(:color, "z", type: :nominal, axis: [title: "Voiced"])
 end
 |> then(&VegaLite.concat(VegaLite.new(), &1, :vertical))
+```
+
+Next we can overlay the voiced/unvoiced detection with the spectogram from before me masking out all unvoiced windows. Notice the dark vertical bars and how the ripple pattern between them is still clearly visible.
+
+```elixir
+spectograms
+|> Enum.zip_with(zero_crossings, fn s, z ->
+  s |> Nx.multiply(Nx.less(z, 0.2) |> Nx.multiply(0.8) |> Nx.add(0.2))
+end)
+|> KinoZoetrope.TensorStack.new(
+  size: 350,
+  titel: "Masked Spectra of Voiced Segments",
+  show_meta: false,
+  labels: ["Speech 1", "Speech 2"],
+  cmap: "inferno"
+)
 ```
