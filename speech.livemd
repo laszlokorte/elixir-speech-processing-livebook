@@ -523,13 +523,61 @@ Next we can overlay the voiced/unvoiced detection with the spectogram from befor
 ```elixir
 spectograms
 |> Enum.zip_with(zero_crossings, fn s, z ->
-  s |> Nx.multiply(Nx.less(z, 0.2) |> Nx.multiply(0.8) |> Nx.add(0.2))
+  s
+  |> Nx.multiply(Nx.less(z, 0.2) |> Nx.multiply(0.8) |> Nx.add(0.2))
 end)
 |> KinoZoetrope.TensorStack.new(
   size: 350,
   titel: "Masked Spectra of Voiced Segments",
-  show_meta: false,
+  show_meta: true,
   labels: ["Speech 1", "Speech 2"],
   cmap: "inferno"
+)
+```
+
+## Sliced Spectogram
+
+Instead of plotting a 2d colored spectogram we can also plot the spectrum for only a single window slice with a slider to select manually which window to plot:
+
+```elixir
+for {spec, {title, _, fr}} <- spectograms |> Enum.zip(speeches) do
+  data =
+    spec[0]
+    |> Nx.to_list()
+    |> Enum.with_index()
+    |> Enum.flat_map(fn {freqs, w} ->
+      for {a, c} <- freqs |> Enum.with_index() do
+        %{
+          x: (1 - w / 256) * fr * 0.5,
+          y: a,
+          window: c
+        }
+      end
+    end)
+
+  VegaLite.new(
+    width: 700,
+    title: "Spectrum of Window Slice: #{title}"
+  )
+  |> VegaLite.data_from_values(data)
+  |> VegaLite.mark(:line)
+  |> VegaLite.encode_field(:x, "x", type: :quantitative, axis: [title: "Freq (hz)"])
+  |> VegaLite.encode_field(:y, "y",
+    type: :quantitative,
+    scale: [domain: [0, 1.5]],
+    axis: [title: "Amplitude"]
+  )
+  |> VegaLite.transform(filter: "datum.window == window")
+end
+|> then(&VegaLite.concat(VegaLite.new(title: "Spectra"), &1, :vertical))
+|> VegaLite.param("window",
+  value: 0,
+  bind: [
+    name: "Window",
+    input: :range,
+    min: 0,
+    max: Enum.map(spectograms, &(Nx.to_number(Nx.axis_size(&1, 2)) - 1)) |> Enum.min(),
+    step: 1
+  ]
 )
 ```
