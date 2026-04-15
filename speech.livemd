@@ -61,6 +61,7 @@ defmodule SimpleWavNx do
 
     tensor =
       decode_tensor(data, bits_per_sample, channels, block_align)
+      |> normalize(bits_per_sample)
 
     %{
       channels: channels,
@@ -69,7 +70,6 @@ defmodule SimpleWavNx do
       samples: tensor
     }
   end
-
 
   defp parse_chunks(<<>>, acc), do: acc
 
@@ -126,6 +126,20 @@ defmodule SimpleWavNx do
     |> Nx.reshape({:auto, channels})
     |> Nx.transpose()
   end
+
+  defp normalize(tensor, bits) do
+    max =
+      case bits do
+        8 -> 128
+        16 -> 32768
+        24 -> 8_388_608
+        32 -> 2_147_483_648
+      end
+
+    tensor
+    |> Nx.as_type(:f32)
+    |> Nx.divide(max)
+  end
 end
 
 Kino.nothing()
@@ -151,6 +165,9 @@ sr1 |> IO.inspect(label: "Sampling rate (Hz)")
 
 Nx.shape(speech2) |> IO.inspect(label: "Tensor shape (channels, samples)")
 sr2 |> IO.inspect(label: "Sampling rate (Hz)")
+
+Nx.reduce_max(speech1) |> IO.inspect(label: "Speech 1 Max Amplitude")
+Nx.reduce_max(speech2) |> IO.inspect(label: "Speech 2 Max Amplitude")
 
 Kino.nothing()
 ```
@@ -260,6 +277,8 @@ defmodule Hann do
     |> Nx.multiply(0.5)
   end
 end
+
+Kino.nothing()
 ```
 
 Lets generate and plot a Hann window. Observe how at the center the function value is 1.0 and to the edges it fades to 0. But also notic how the values are not quite symmetric. The left most value is 0.0 but the right most value is not. This is intentional for allowing the window to be tiled periodically.
@@ -276,20 +295,119 @@ data =
   |> VegaLite.encode_field(:y, "y", type: :quantitative, axis: [title: "Amplitude"])
 ```
 
-## Fundamental Frequency Estimator
+## Time-Domain Windows
 
-With everything prepared we can now do our first actual calculation to analyse our audio data.
-With the assumtion that the audio files contain spoken language we can try to extract the speakers voice fundamental frequency.
+Now that we have prepared our tools we can put them to work to analyze our audio signals.
 
-We cut each signal into slices of 32ms length. The audio file sample rate is used to determine the number of samples that correspond to a time duration of 32ms.
+The first step is the cut the single long signal into indidual short segments (windows).
+Additional we weight the sample in each window with our Hann function.
 
-The core idea is to auto-correleate each window slice with its self to find its fundamental frequency.
+As window width we choose 32ms and use the sample rate to derive the corresponding number of samples. In our case 32ms corresponds to 512 samples.
+
+We let the windows overlap by 50%, ie 256 samples.
+
+Finally we plot each individual window and add a slider to allow choosing the window to be plotted.
+This allows us to scroll through the samplesacross the time axis.
+
+We plot the original window samples in blue and the Hann-scaled samples in red. Note how the red curve fades to zero on the left and right end.
 
 ```elixir
 winsize_ms = 32
 
 speeches = [{"Speech 1", speech1, sr1}, {"Speech 2", speech2, sr2}]
 
+speeches_windows =
+  for {_title, speech, sr} <- speeches do
+    # convert milliseconds to number of samples
+    winsize = max((sr * winsize_ms) |> div(1000), 1)
+
+    speech[0]
+    |> Window.sliding_windows(size: winsize, stride: winsize)
+  end
+
+for {windows, {title, _speech, sr}} <- speeches_windows |> Enum.zip(speeches) do
+  winsize = Nx.axis_size(windows, 1)
+  hann = Hann.window(size: winsize)
+  damped = windows |> Nx.multiply(hann) |> Nx.to_list()
+
+  data =
+    windows
+    |> Nx.to_list()
+    |> Enum.zip(damped)
+    |> Enum.with_index()
+    |> Enum.flat_map(fn {{window, dwin}, w} ->
+      window
+      |> Enum.zip(dwin)
+      |> Enum.with_index()
+      |> Enum.flat_map(fn {{a, b}, c} ->
+        [
+          %{
+            x: (w * 512 + c) / sr,
+            y: a,
+            window: w,
+            color: "original"
+          },
+          %{
+            x: (w * 512 + c) / sr,
+            y: b,
+            window: w,
+            color: "hann-scaled"
+          }
+        ]
+      end)
+    end)
+
+  VegaLite.new(
+    width: 600,
+    title: "Spectrum of Window Slice: #{title}"
+  )
+  |> VegaLite.data_from_values(data)
+  |> VegaLite.mark(:line)
+  |> VegaLite.encode_field(:color, "color", type: :nominal, scale: [range: ["red", "blue"]])
+  |> VegaLite.encode_field(:x, "x",
+    type: :quantitative,
+    axis: [title: "Time (s)", nice: false],
+    scale: [nice: false, round: false]
+  )
+  |> VegaLite.encode_field(:y, "y",
+    type: :quantitative,
+    scale: [domain: [-0.1, 0.1]],
+    axis: [title: "Amplitude"]
+  )
+  |> VegaLite.transform(filter: "datum.window == window ")
+end
+|> then(&VegaLite.concat(VegaLite.new(title: "Spectra"), &1, :vertical))
+|> VegaLite.param("window",
+  value: 0,
+  bind: [
+    name: "Window",
+    input: :range,
+    min: 0,
+    max: Enum.map(speeches_windows, &(Nx.to_number(Nx.axis_size(&1, 0)) - 1)) |> Enum.min(),
+    step: 1
+  ]
+)
+```
+
+## Fundamental Frequency Estimator
+
+Instead of just plotting each window we can do more calculations to extract features of each window.
+With the assumtion that the audio files contain spoken language we can try to extract the speakers voice fundamental frequency in each window.
+
+The fundamental frequency is the lowest frequency that is most prominent in the signal.
+It can be determined by overlaying the signal with itself and shifting it across itself along the time axis until the first offset position is found at which there is a good match between the original and the shifted match is found. In other words we are looking for the self-similarity of the signal with itself across the time axis.
+
+The name for this calculation to determine this similarity is called correlation, or more specifically auto-correlation for the similarity between the signal and itself.
+
+Nx provides a function called `conv` (short for convolution, a closely related calculation) to calculate the correlation.
+
+So our next step is to calculate `Nx.argmax(Nx.conv(win, win))` for each signal window to find the best matching time-offset.
+
+With the assumtion of the audio signal containing human voice we can pin down the range of expected frequencies even more, by post-prosessing the conv result.
+
+Additionally we check via threshold if there isa strong auto-correlation at all. Signals without a high auto correlation do not have a clear fundamental frequency and can be regarded as noise.
+
+```elixir
 fundamentals =
   for {_, speech, sr} <- speeches do
     threshold = 32 / sr
@@ -307,9 +425,6 @@ fundamentals =
 
     lag =
       speech
-
-      # normalize sample values to be between -1.0 and 1.0
-      |> Nx.divide(32768.0)
       # discard channels
       |> Nx.sum(axes: [0])
       # slice signal into overlapping windows
@@ -322,6 +437,7 @@ fundamentals =
       |> Nx.new_axis(0)
       |> Nx.new_axis(0)
       # calculate auto correlation of each window
+      # (the window needs to be padded via concat to make rooming for shifting across itself)
       |> then(&Nx.conv(Nx.concatenate([&1, &1], axis: 2), &1))
       # remove artificial axes introduced before
       |> Nx.squeeze(axes: [0, 1])
@@ -357,7 +473,7 @@ for {{fundamental, _energy, strong}, {title, _, sr}} <- fundamentals |> Enum.zip
     |> Enum.with_index()
     |> Enum.map(fn {{y, s}, x} ->
       %{
-        x: x * winsize_ms / 1000,
+        x: x * winsize_ms / 2 / 1000,
         y: y,
         z: if(s > 0, do: ">#{threshold}", else: "<= #{threshold}")
       }
@@ -370,7 +486,7 @@ for {{fundamental, _energy, strong}, {title, _, sr}} <- fundamentals |> Enum.zip
     |> round
 
   VegaLite.new(
-    width: 700,
+    width: 600,
     title: "Estimated Fundamental of #{title} (Thresholded Mean: #{mean_fundamental}Hz)"
   )
   |> VegaLite.data_from_values(data)
@@ -383,11 +499,57 @@ end
 |> then(&VegaLite.concat(VegaLite.new(), &1, :vertical))
 ```
 
+Instead of directly picking the best fitting fundamental frequency from the auto-correlation we can also plot the auto-correlation for each window across 2 dimensions. Below each window is a column of pixels and inside each column from top to bottom the brightness corresponds to the auto-correlation. The vertical axis is the time shift.
+
+```elixir
+spectograms =
+  for {speech, sr} <-
+        [
+          {speech1, sr1},
+          {speech2, sr2}
+        ] do
+    winsize = max((sr * winsize_ms) |> div(1000), 1)
+
+    speech
+    # discard channels
+    |> Nx.sum(axes: [0])
+    # slice signal into overlapping windows
+    |> Window.sliding_windows(size: winsize, stride: winsize |> div(2))
+    # process each window on its own
+    |> Nx.vectorize(:windows)
+    # weight window with Hann 
+    # introduce extra axes required to to Nx convolution
+    |> Nx.new_axis(0)
+    |> Nx.new_axis(0)
+    # calculate auto correlation of each window
+    # (the window needs to be padded via concat to make rooming for shifting across itself)
+    |> then(&Nx.conv(Nx.concatenate([&1, &1], axis: 2), &1))
+    |> Nx.abs()
+    # remove artificial axes introduced before
+    |> Nx.squeeze(axes: [0, 1])
+    |> Nx.slice_along_axis(0, div(winsize, 2) + 1, axis: 0)
+    |> Nx.devectorize()
+    |> Nx.add(Nx.Constants.epsilon(:f32))
+    |> Nx.sqrt()
+    |> Nx.transpose()
+    |> Nx.new_axis(-1)
+  end
+
+spectograms
+|> KinoZoetrope.TensorStack.new(
+  titel: "Auto-Correlation across windows",
+  show_meta: false,
+  size: 300,
+  labels: ["Speech 1", "Speech 2"],
+  cmap: "inferno"
+)
+```
+
 ## Plotting Spectra
 
-Instead of just estimating the fundamental frequency of each window we can extract all frequencies of all windows via discrete (fast) fourier transform. This is called short time fourier transform because the fourier transform is applied not to the whole signal at once but to short time slices (our windows).
+Instead of just estimating the fundamental frequency of each window we can extract the full frequency spectrum of all windows via discrete (fast) fourier transform. This is called short-time-fourier-transform (STFT) because the fourier transform is applied not to the whole signal at once but to short time slices (our windows).
 
-The overall structure looks similar to before but instead of auto correlation we apply the FFT.
+The overall structure looks similar to before but instead of auto correlation we apply the FFT (`Nx.fft`) to each window.
 
 ```elixir
 spectograms =
@@ -524,12 +686,12 @@ Next we can overlay the voiced/unvoiced detection with the spectogram from befor
 spectograms
 |> Enum.zip_with(zero_crossings, fn s, z ->
   s
-  |> Nx.multiply(Nx.less(z, 0.2) |> Nx.multiply(0.8) |> Nx.add(0.2))
+  |> Nx.multiply(Nx.less(z, 0.2) |> Nx.multiply(-0.8))
 end)
 |> KinoZoetrope.TensorStack.new(
   size: 350,
   titel: "Masked Spectra of Voiced Segments",
-  show_meta: true,
+  show_meta: false,
   labels: ["Speech 1", "Speech 2"],
   cmap: "inferno"
 )
@@ -564,75 +726,7 @@ for {spec, {title, _, fr}} <- spectograms |> Enum.zip(speeches) do
   |> VegaLite.encode_field(:x, "x", type: :quantitative, axis: [title: "Freq (hz)"])
   |> VegaLite.encode_field(:y, "y",
     type: :quantitative,
-    scale: [domain: [0, 1.5]],
-    axis: [title: "Amplitude"]
-  )
-  |> VegaLite.transform(filter: "datum.window == window")
-end
-|> then(&VegaLite.concat(VegaLite.new(title: "Spectra"), &1, :vertical))
-|> VegaLite.param("window",
-  value: 0,
-  bind: [
-    name: "Window",
-    input: :range,
-    min: 0,
-    max: Enum.map(spectograms, &(Nx.to_number(Nx.axis_size(&1, 2)) - 1)) |> Enum.min(),
-    step: 1
-  ]
-)
-```
-
-## Time-Domain Windows
-
-```elixir
-hann = Hann.window(size: 512)
-
-for {title, speech, _} <- speeches do
-  windows =
-    speech[0]
-    |> Nx.divide(3276.0)
-    |> Window.sliding_windows(size: 512, stride: 256)
-
-  damped = windows |> Nx.multiply(hann) |> Nx.to_list()
-
-  data =
-    windows
-    |> Nx.to_list()
-    |> Enum.zip(damped)
-    |> Enum.with_index()
-    |> Enum.flat_map(fn {{window, dwin}, w} ->
-      window
-      |> Enum.zip(dwin)
-      |> Enum.with_index()
-      |> Enum.flat_map(fn {{a, b}, c} ->
-        [
-          %{
-            x: c,
-            y: a,
-            window: w,
-            color: "original"
-          },
-          %{
-            x: c,
-            y: b,
-            window: w,
-            color: "hann-scaled"
-          }
-        ]
-      end)
-    end)
-
-  VegaLite.new(
-    width: 700,
-    title: "Spectrum of Window Slice: #{title}"
-  )
-  |> VegaLite.data_from_values(data)
-  |> VegaLite.mark(:line)
-  |> VegaLite.encode_field(:color, "color", type: :nominal, scale: [range: ["red", "blue"]])
-  |> VegaLite.encode_field(:x, "x", type: :quantitative, axis: [title: "Freq (hz)"])
-  |> VegaLite.encode_field(:y, "y",
-    type: :quantitative,
-    scale: [domain: [-1, 1]],
+    scale: [domain: [-1.5, 0.3]],
     axis: [title: "Amplitude"]
   )
   |> VegaLite.transform(filter: "datum.window == window")
