@@ -749,30 +749,49 @@ end
 We can reconstruct an aproximation of the original signal by generating an a sequence of impulses of the same fundamental frequency for each window.
 
 ```elixir
+freq_bins = 512
+hann = Hann.window(size: freq_bins, cyclic: true) |> Nx.reshape({freq_bins, 1})
+
 impulses =
   for {f, _, thres} <- fundamentals do
-    Nx.iota({512, 1})
-    |> Nx.add(256)
+    Nx.iota({freq_bins, 1})
+    |> Nx.add(div(freq_bins, 2))
     |> Nx.remainder(Nx.vectorize(f, :window))
     |> Nx.equal(0)
     |> Nx.multiply(Nx.vectorize(thres, :window))
   end
 
-for {impulse, {title, _speech, sr}} <- impulses |> Enum.zip(speeches) do
+impulses_hann = impulses |> Enum.map(&Nx.multiply(&1, hann))
+
+for {{impulse, impulse_hann}, {title, _speech, sr}} <-
+      impulses |> Enum.zip(impulses_hann) |> Enum.zip(speeches) do
   data =
     impulse
     |> Nx.devectorize()
     |> Nx.to_list()
+    |> Enum.zip(
+      impulse_hann
+      |> Nx.devectorize()
+      |> Nx.to_list()
+    )
     |> Enum.with_index()
-    |> Enum.flat_map(fn {f, w} ->
+    |> Enum.flat_map(fn {{f, fh}, w} ->
       f
+      |> Enum.zip(fh)
       |> Enum.with_index()
-      |> Enum.flat_map(fn {a, t} ->
+      |> Enum.flat_map(fn {{a, b}, t} ->
         [
           %{
             x: (w * 512 + t) / sr,
             y: a,
-            window: w
+            window: w,
+            color: "orig"
+          },
+          %{
+            x: (w * 512 + t) / sr,
+            y: b,
+            window: w,
+            color: "hann"
           }
         ]
       end)
@@ -794,6 +813,7 @@ for {impulse, {title, _speech, sr}} <- impulses |> Enum.zip(speeches) do
     axis: [title: "Amplitude"],
     scale: [domain: [0, 1]]
   )
+  |> VegaLite.encode_field(:color, "color", type: :nominal, scale: [range: ["blue", "pink"]])
   |> VegaLite.transform(filter: "datum.window == window ")
 end
 |> then(&VegaLite.concat(VegaLite.new(title: "Spectra"), &1, :vertical))
