@@ -166,8 +166,8 @@ sr1 |> IO.inspect(label: "Sampling rate (Hz)")
 Nx.shape(speech2) |> IO.inspect(label: "Tensor shape (channels, samples)")
 sr2 |> IO.inspect(label: "Sampling rate (Hz)")
 
-Nx.reduce_max(speech1) |> IO.inspect(label: "Speech 1 Max Amplitude")
-Nx.reduce_max(speech2) |> IO.inspect(label: "Speech 2 Max Amplitude")
+Nx.reduce_max(speech1) |> Nx.to_number() |> IO.inspect(label: "Speech 1 Max Amplitude")
+Nx.reduce_max(speech2) |> Nx.to_number() |> IO.inspect(label: "Speech 2 Max Amplitude")
 
 Kino.nothing()
 ```
@@ -322,7 +322,7 @@ speeches_windows =
     winsize = max((sr * winsize_ms) |> div(1000), 1)
 
     speech[0]
-    |> Window.sliding_windows(size: winsize, stride: winsize)
+    |> Window.sliding_windows(size: winsize, stride: winsize |> div(2))
   end
 
 for {windows, {title, _speech, sr}} <- speeches_windows |> Enum.zip(speeches) do
@@ -342,13 +342,13 @@ for {windows, {title, _speech, sr}} <- speeches_windows |> Enum.zip(speeches) do
       |> Enum.flat_map(fn {{a, b}, c} ->
         [
           %{
-            x: (w * 512 + c) / sr,
+            x: (w * 512 / 2 + c) / sr,
             y: a,
             window: w,
             color: "original"
           },
           %{
-            x: (w * 512 + c) / sr,
+            x: (w * 512 / 2 + c) / sr,
             y: b,
             window: w,
             color: "hann-scaled"
@@ -759,9 +759,11 @@ impulses =
     |> Nx.remainder(Nx.vectorize(f, :window))
     |> Nx.equal(0)
     |> Nx.multiply(Nx.vectorize(thres, :window))
+    |> Nx.devectorize()
+    |> Nx.squeeze(axes: [-1])
   end
 
-impulses_hann = impulses |> Enum.map(&Nx.multiply(&1, hann))
+impulses_hann = impulses |> Enum.map(&Nx.multiply(&1, Nx.flatten(hann)))
 
 for {{impulse, impulse_hann}, {title, _speech, sr}} <-
       impulses |> Enum.zip(impulses_hann) |> Enum.zip(speeches) do
@@ -782,13 +784,13 @@ for {{impulse, impulse_hann}, {title, _speech, sr}} <-
       |> Enum.flat_map(fn {{a, b}, t} ->
         [
           %{
-            x: (w * 512 + t) / sr,
+            x: (w * 512 / 2 + t) / sr,
             y: a,
             window: w,
             color: "orig"
           },
           %{
-            x: (w * 512 + t) / sr,
+            x: (w * 512 / 2 + t) / sr,
             y: b,
             window: w,
             color: "hann"
@@ -825,6 +827,57 @@ end
     min: 0,
     max: Enum.map(speeches_windows, &(Nx.to_number(Nx.axis_size(&1, 0)) - 1)) |> Enum.min(),
     step: 1
+  ]
+)
+```
+
+```elixir
+reconstructed_fundamentals =
+  for win <-
+        Enum.concat(speeches_windows, impulses) do
+    Nx.shape(win) |> dbg
+
+    pairs =
+      win
+      |> Nx.devectorize(keep_names: false)
+      |> Nx.vectorize(:windowx)
+      |> Nx.multiply(Nx.reshape(hann, {:auto}))
+      |> Nx.subtract(0.01)
+      |> Nx.devectorize()
+      |> then(
+        &if(Nx.axis_size(&1, 0) |> Nx.to_number() |> rem(2) == 0,
+          do: &1,
+          else: Nx.concatenate([&1, Nx.broadcast(0, {1, 512})])
+        )
+      )
+      |> Nx.transpose(axes: [0, 1])
+      |> Nx.reshape({:auto, 512, 2})
+      |> Nx.transpose(axes: [2, 0, 1])
+      |> Nx.reshape({2, :auto})
+
+    Nx.add(
+      Nx.concatenate([Nx.broadcast(0, {128}), pairs[0]], axis: 0),
+      Nx.concatenate([pairs[1], Nx.broadcast(0, {128})], axis: 0)
+    )
+    |> Nx.new_axis(0)
+  end
+
+reconstructed_fundamentals
+|> KinoPhonograph.WavePlot.plot(
+  labels: [
+    "speech 1 reconstruction from spectogram",
+    "speech 2 reconstruction from spectogram",
+    "speech 1 fundamental reconstruction",
+    "speech 2 fundamental reconstruction"
+  ],
+  titel: "Waveforms",
+  width: 400,
+  background: {0, 0.2, 0.5, 1},
+  foreground: {1, 1, 1, 1},
+  ranges: [
+    # highlight the slice ranges in the first to plots
+    {slice1_start, slice1_end, {0.7, 0.0, 0.0, 1.0}},
+    {slice2_start, slice2_end, {0.7, 0.0, 0.0, 1.0}}
   ]
 )
 ```
