@@ -743,3 +743,68 @@ end
   ]
 )
 ```
+
+## Impulse Train
+
+We can reconstruct an aproximation of the original signal by generating an a sequence of impulses of the same fundamental frequency for each window.
+
+```elixir
+impulses =
+  for {f, _, thres} <- fundamentals do
+    Nx.iota({512, 1})
+    |> Nx.add(256)
+    |> Nx.remainder(Nx.vectorize(f, :window))
+    |> Nx.equal(0)
+    |> Nx.multiply(Nx.vectorize(thres, :window))
+  end
+
+for {impulse, {title, _speech, sr}} <- impulses |> Enum.zip(speeches) do
+  data =
+    impulse
+    |> Nx.devectorize()
+    |> Nx.to_list()
+    |> Enum.with_index()
+    |> Enum.flat_map(fn {f, w} ->
+      f
+      |> Enum.with_index()
+      |> Enum.flat_map(fn {a, t} ->
+        [
+          %{
+            x: (w * 512 + t) / sr,
+            y: a,
+            window: w
+          }
+        ]
+      end)
+    end)
+
+  VegaLite.new(
+    width: 600,
+    title: "Fundamental Impulses: #{title}"
+  )
+  |> VegaLite.data_from_values(data)
+  |> VegaLite.mark(:line)
+  |> VegaLite.encode_field(:x, "x",
+    type: :quantitative,
+    axis: [title: "Time (s)", nice: false],
+    scale: [nice: false, round: false]
+  )
+  |> VegaLite.encode_field(:y, "y",
+    type: :quantitative,
+    axis: [title: "Amplitude"],
+    scale: [domain: [0, 1]]
+  )
+  |> VegaLite.transform(filter: "datum.window == window ")
+end
+|> then(&VegaLite.concat(VegaLite.new(title: "Spectra"), &1, :vertical))
+|> VegaLite.param("window",
+  value: 0,
+  bind: [
+    name: "Window",
+    input: :range,
+    min: 0,
+    max: Enum.map(speeches_windows, &(Nx.to_number(Nx.axis_size(&1, 0)) - 1)) |> Enum.min(),
+    step: 1
+  ]
+)
+```
