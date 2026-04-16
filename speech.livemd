@@ -5,12 +5,12 @@
 ```elixir
 Mix.install([
   {:nx, "~> 0.11.0"},
-  {:kino_zoetrope, "~> 0.22.0"},
+  {:kino_zoetrope, "~> 0.23.0"},
   {:kino_rewind, "~> 0.1.0"},
   {:exla, "~> 0.11.0"},
   {:kino, "~> 0.19.0"},
   {:kino_vega_lite, "~> 0.1.13"},
-  {:kino_phonograph, "~> 0.4.0"}
+  {:kino_phonograph, "~> 0.5.0"}
 ])
 ```
 
@@ -207,6 +207,8 @@ But we can *zoom in* by slicing a shorter sub sequence of samples from the audio
   ],
   titel: "Waveforms",
   width: 400,
+  x_axis: "time",
+  y_axis: "amplitude",
   background: {0, 0.2, 0.5, 1},
   foreground: {1, 1, 1, 1},
   ranges: [
@@ -541,7 +543,9 @@ spectograms
   show_meta: false,
   size: 300,
   labels: ["Speech 1", "Speech 2"],
-  cmap: "inferno"
+  cmap: "inferno",
+  x_axis: "window",
+  y_axis: "cross-correlation"
 )
 ```
 
@@ -593,6 +597,8 @@ spectograms
   labels: ["Speech 1", "Speech 2"],
   cmap: "inferno",
   frame_label: "Fundamental",
+  x_axis: "window / time",
+  y_axis: "frequency",
 
   # draw estimated fundamental frequencies as overlay into figure
   markers:
@@ -693,7 +699,9 @@ end)
   titel: "Masked Spectra of Voiced Segments",
   show_meta: false,
   labels: ["Speech 1", "Speech 2"],
-  cmap: "inferno"
+  cmap: "inferno",
+  x_axis: "window / time",
+  y_axis: "frequency"
 )
 ```
 
@@ -869,6 +877,8 @@ reconstructed_fundamentals
   ],
   titel: "Waveforms",
   width: 400,
+  x_axis: "time",
+  y_axis: "amplitude",
   background: {0, 0.2, 0.5, 1},
   foreground: {1, 1, 1, 1},
   ranges: [
