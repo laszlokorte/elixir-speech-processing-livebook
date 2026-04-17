@@ -10,7 +10,7 @@ Mix.install([
   {:exla, "~> 0.11.0"},
   {:kino, "~> 0.19.0"},
   {:kino_vega_lite, "~> 0.1.13"},
-  {:kino_phonograph, "~> 0.5.0"}
+  {:kino_phonograph, "~> 0.6.0"}
 ])
 ```
 
@@ -206,7 +206,7 @@ But we can *zoom in* by slicing a shorter sub sequence of samples from the audio
     "speech 2 slice (#{slice2_start}-#{slice2_end})"
   ],
   titel: "Waveforms",
-  width: 400,
+  width: 380,
   x_axis: "time",
   y_axis: "amplitude",
   background: {0, 0.2, 0.5, 1},
@@ -215,6 +215,44 @@ But we can *zoom in* by slicing a shorter sub sequence of samples from the audio
     # highlight the slice ranges in the first to plots
     {slice1_start, slice1_end, {0.7, 0.0, 0.0, 1.0}},
     {slice2_start, slice2_end, {0.7, 0.0, 0.0, 1.0}}
+  ]
+)
+```
+
+## Playing Sound
+
+The best way to inspect audio signals is listening to them:
+
+```elixir
+[speech1, speech2]
+|> KinoPhonograph.Player.new(
+  sample_rate: 16000,
+  label: [
+    "Speech 1",
+    "Speech 2",
+  ]
+)
+```
+
+## Mixing two mono Signals to single Stereo
+
+We can also mix two mono signals into a single stereo signal. For this to work the signals must be cut into the exact same length:
+
+```elixir
+[
+  Nx.concatenate(
+    [
+      speech1[[.., 0..44400]],
+      speech2[[.., 0..44400]]
+    ],
+    axis: 0
+  )
+]
+|> KinoPhonograph.Player.new(
+  sample_rate: 16000,
+  label: [
+    "Speech 1",
+    "Speech 2"
   ]
 )
 ```
@@ -249,6 +287,70 @@ defmodule Window do
 end
 
 Kino.nothing()
+```
+
+## Window Example
+
+```elixir
+winsize_ms = 32
+
+speeches = [{"Speech 1", speech1, sr1}, {"Speech 2", speech2, sr2}]
+
+speeches_windows =
+  for {_title, speech, sr} <- speeches do
+    # convert milliseconds to number of samples
+    winsize = max((sr * winsize_ms) |> div(1000), 1)
+
+    speech[0]
+    |> Window.sliding_windows(size: winsize, stride: winsize |> div(2))
+  end
+
+for {windows, {title, _speech, sr}} <- speeches_windows |> Enum.zip(speeches) do
+  data =
+    windows
+    |> Nx.to_list()
+    |> Enum.with_index()
+    |> Enum.flat_map(fn {window, w} ->
+      window
+      |> Enum.with_index()
+      |> Enum.map(fn {a, c} ->
+        %{
+          x: (w * 512 / 2 + c) / sr,
+          y: a,
+          window: w
+        }
+      end)
+    end)
+
+  VegaLite.new(
+    width: 600,
+    title: "Spectrum of Window Slice: #{title}"
+  )
+  |> VegaLite.data_from_values(data)
+  |> VegaLite.mark(:line)
+  |> VegaLite.encode_field(:x, "x",
+    type: :quantitative,
+    axis: [title: "Time (s)", nice: false],
+    scale: [nice: false, round: false]
+  )
+  |> VegaLite.encode_field(:y, "y",
+    type: :quantitative,
+    scale: [domain: [-0.1, 0.1]],
+    axis: [title: "Amplitude"]
+  )
+  |> VegaLite.transform(filter: "datum.window == window ")
+end
+|> then(&VegaLite.concat(VegaLite.new(title: "Spectra"), &1, :vertical))
+|> VegaLite.param("window",
+  value: 0,
+  bind: [
+    name: "Window",
+    input: :range,
+    min: 0,
+    max: Enum.map(speeches_windows, &(Nx.to_number(Nx.axis_size(&1, 0)) - 1)) |> Enum.min(),
+    step: 1
+  ]
+)
 ```
 
 ## Hann Window
@@ -314,19 +416,6 @@ This allows us to scroll through the samplesacross the time axis.
 We plot the original window samples in blue and the Hann-scaled samples in red. Note how the red curve fades to zero on the left and right end.
 
 ```elixir
-winsize_ms = 32
-
-speeches = [{"Speech 1", speech1, sr1}, {"Speech 2", speech2, sr2}]
-
-speeches_windows =
-  for {_title, speech, sr} <- speeches do
-    # convert milliseconds to number of samples
-    winsize = max((sr * winsize_ms) |> div(1000), 1)
-
-    speech[0]
-    |> Window.sliding_windows(size: winsize, stride: winsize |> div(2))
-  end
-
 for {windows, {title, _speech, sr}} <- speeches_windows |> Enum.zip(speeches) do
   winsize = Nx.axis_size(windows, 1)
   hann = Hann.window(size: winsize)
@@ -541,7 +630,7 @@ spectograms
 |> KinoZoetrope.TensorStack.new(
   titel: "Auto-Correlation across windows",
   show_meta: false,
-  size: 300,
+  size: 330,
   labels: ["Speech 1", "Speech 2"],
   cmap: "inferno",
   x_axis: "window",
@@ -591,7 +680,7 @@ spectograms =
 
 spectograms
 |> KinoZoetrope.TensorStack.new(
-  size: 350,
+  size: 320,
   titel: "Magnitude Spectra",
   show_meta: false,
   labels: ["Speech 1", "Speech 2"],
@@ -695,7 +784,7 @@ spectograms
   |> Nx.multiply(Nx.less(z, 0.2) |> Nx.multiply(-0.8))
 end)
 |> KinoZoetrope.TensorStack.new(
-  size: 350,
+  size: 320,
   titel: "Masked Spectra of Voiced Segments",
   show_meta: false,
   labels: ["Speech 1", "Speech 2"],
@@ -735,7 +824,7 @@ for {spec, {title, _, fr}} <- spectograms |> Enum.zip(speeches) do
   |> VegaLite.encode_field(:y, "y",
     type: :quantitative,
     scale: [domain: [-1.5, 0.3]],
-    axis: [title: "Amplitude"]
+    axis: [title: "Magnitude"]
   )
   |> VegaLite.transform(filter: "datum.window == window")
 end
@@ -855,19 +944,21 @@ reconstructed_fundamentals =
           else: Nx.concatenate([&1, Nx.broadcast(0, {1, 512})])
         )
       )
-      |> Nx.transpose(axes: [0, 1])
-      |> Nx.reshape({:auto, 512, 2})
-      |> Nx.transpose(axes: [2, 0, 1])
+      |> Nx.reshape({:auto, 2, 512})
+      |> Nx.transpose(axes: [1, 0, 2])
       |> Nx.reshape({2, :auto})
 
+    offset = 256
+
     Nx.add(
-      Nx.concatenate([Nx.broadcast(0, {128}), pairs[0]], axis: 0),
-      Nx.concatenate([pairs[1], Nx.broadcast(0, {128})], axis: 0)
+      Nx.concatenate([Nx.broadcast(0, {offset}), pairs[1]], axis: 0),
+      Nx.concatenate([pairs[0], Nx.broadcast(0, {offset})], axis: 0)
     )
     |> Nx.new_axis(0)
   end
 
-reconstructed_fundamentals
+[speech1, speech2]
+|> Enum.concat(reconstructed_fundamentals)
 |> KinoPhonograph.WavePlot.plot(
   labels: [
     "speech 1 reconstruction from spectogram",
@@ -876,7 +967,7 @@ reconstructed_fundamentals
     "speech 2 fundamental reconstruction"
   ],
   titel: "Waveforms",
-  width: 400,
+  width: 380,
   x_axis: "time",
   y_axis: "amplitude",
   background: {0, 0.2, 0.5, 1},
@@ -884,7 +975,27 @@ reconstructed_fundamentals
   ranges: [
     # highlight the slice ranges in the first to plots
     {slice1_start, slice1_end, {0.7, 0.0, 0.0, 1.0}},
+    {slice2_start, slice2_end, {0.7, 0.0, 0.0, 1.0}},
+    {slice1_start, slice1_end, {0.7, 0.0, 0.0, 1.0}},
     {slice2_start, slice2_end, {0.7, 0.0, 0.0, 1.0}}
+  ]
+)
+```
+
+```elixir
+[speech1, speech2]
+|> Enum.concat(reconstructed_fundamentals)
+|> Enum.concat([Nx.concatenate([speech1[[.., 0..44400]], speech2[[.., 0..44400]]], axis: 0)])
+|> KinoPhonograph.Player.new(
+  sample_rate: 16000,
+  label: [
+    "Original 1",
+    "Original 2",
+    "Reconstructed 1",
+    "Reconstructed 2",
+    "Fundamental 1",
+    "Fundamental2",
+    "Stereo Composition"
   ]
 )
 ```
