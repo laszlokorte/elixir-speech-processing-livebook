@@ -912,7 +912,7 @@ Kino.nothing()
 ```
 
 ```elixir
-m = 32
+m = 12
 sr_hz = 16000
 
 responses =
@@ -1109,6 +1109,16 @@ impulses =
     |> Nx.squeeze(axes: [-1])
   end
 
+impulses_harmonics_spec =
+  for {imp, {_, res}} <- Enum.zip(impulses, responses) do
+    imp
+    |> Nx.vectorize(:window)
+    |> Nx.fft()
+    |> Nx.multiply(res)
+    |> Nx.real()
+    |> Nx.devectorize()
+  end
+
 impulses_harmonics =
   for {imp, {_, res}} <- Enum.zip(impulses, responses) do
     imp
@@ -1187,6 +1197,27 @@ end
     max: Enum.map(speeches_windows, &(Nx.to_number(Nx.axis_size(&1, 0)) - 1)) |> Enum.min(),
     step: 1
   ]
+)
+```
+
+```elixir
+impulses_harmonics_spec
+|> Enum.map(&Nx.abs(&1))
+|> Enum.map(&Nx.add(&1, Nx.Constants.epsilon(:f32)))
+|> Enum.map(&Nx.log(&1))
+|> Enum.map(&Nx.devectorize(&1))
+|> Enum.map(&Nx.slice_along_axis(&1, 256, 256, axis: 1))
+|> Enum.map(&Nx.transpose(&1, axes: [1, 0]))
+|> Enum.map(&Nx.new_axis(&1, 0))
+|> then(&Enum.concat(spectograms, &1))
+|> KinoZoetrope.TensorStack.new(
+  size: 300,
+  titel: "Masked Spectra of Voiced Segments",
+  show_meta: false,
+  labels: ["Speech 1", "Speech 2", "Reconstructed Harmonics 1", "Reconstructed Harmonics 2"],
+  cmap: "inferno",
+  x_axis: "window / time",
+  y_axis: "frequency"
 )
 ```
 
@@ -1318,7 +1349,9 @@ reconstructed_fundamentals =
     "speech 1 reconstruction from spectogram",
     "speech 2 reconstruction from spectogram",
     "speech 1 fundamental reconstruction",
-    "speech 2 fundamental reconstruction"
+    "speech 2 fundamental reconstruction",
+    "Pre-emphasis 1",
+    "Pre-emphasis 2"
   ],
   titel: "Waveforms",
   width: 380,
