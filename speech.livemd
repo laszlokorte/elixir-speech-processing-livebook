@@ -1129,7 +1129,6 @@ defmodule Freqz do
     opts = keyword!(opts, [:n, :fs])
     worN = opts[:n]
     fs = opts[:fs]
-    a = Nx.concatenate([Nx.tensor([1.0]), a])
 
     w =
       Nx.linspace(0.0, 2.0 * Nx.Constants.pi(), n: worN)
@@ -1144,78 +1143,90 @@ defmodule Freqz do
     j = Nx.complex(0.0, 1.0)
 
     exp_matrix =
-      Nx.exp(
-        Nx.multiply(
-          Nx.multiply(-j, w_col),
-          k_row
-        )
-      )
+      Nx.exp(-j * w_col * k_row)
 
-    h = Nx.dot(exp_matrix, a)
+    den = Nx.dot(exp_matrix, a)
+
+    # avoid division blowups
+    eps = Nx.complex(1.0e-8, 0.0)
+    h = Nx.divide(1.0, den + eps)
 
     freqs =
-      Nx.multiply(w, fs / (2.0 * Nx.Constants.pi()))
+      w * fs / (2.0 * Nx.Constants.pi())
 
     {freqs, h}
   end
 end
+
+Kino.nothing()
 ```
 
 ```elixir
-m = 11
+m = 32
 sr_hz = 16000
 
 responses =
-  for pre <- preempted do
-    corr =
+  for pre <- speeches_windows do
+    pre = Nx.vectorize(pre, :window)
+    n = Nx.axis_size(pre, 0)
+    fft_size = 2 * n
+
+    pre_padded =
       pre
-      |> Nx.new_axis(0)
-      |> Nx.new_axis(0)
-      |> then(&Nx.conv(&1, &1, padding: :same))
-      |> Nx.squeeze(axes: [0, 1])
-      |> Nx.vectorize(:window)
+      |> Nx.pad(0.0, [{0, fft_size - n, 0}])
+
+    fft = Nx.fft(pre_padded)
+
+    corr =
+      fft
+      |> Nx.multiply(Nx.conjugate(fft))
+      |> Nx.ifft()
+      |> Nx.real()
 
     phi = Nx.slice(corr, [0], [m])
     phi2 = Nx.slice(corr, [1], [m])
 
-    # build Toeplitz matrix from first column (-phi) and first row (-phi)
-    col = Nx.negate(phi)
-    row = Nx.negate(phi)
-
+    # Toeplitz WITHOUT negation
     toep =
       Nx.stack(
         for i <- 0..(m - 1) do
           Nx.stack(
             for j <- 0..(m - 1) do
-              if i >= j do
-                Nx.slice(col, [i - j], [1])
-              else
-                Nx.slice(row, [j - i], [1])
-              end
+              idx = abs(i - j)
+              Nx.slice(phi, [idx], [1])
             end
           )
         end
       )
       |> Nx.squeeze(axes: [-1])
 
-    rhs =
-      phi2
-      |> Nx.negate()
+    rhs = Nx.negate(phi2)
 
     a = Nx.LinAlg.solve(toep, rhs)
 
-    Freqz.freqz(a, n: 512, fs: 16000) |> dbg
+    a_full = Nx.concatenate([Nx.tensor([1.0]), a])
+
+    Freqz.freqz(a_full, n: 512, fs: 16000)
   end
 
 Kino.nothing()
 ```
 
 ```elixir
-for {{{freqs, res}, {title, _, fr}}, spec} <-
+for {{{_freqs, res}, {title, _, fr}}, spec} <-
       responses |> Enum.zip(speeches) |> Enum.zip(spectograms) do
+  energy =
+    spec[0]
+    |> Nx.transpose(axes: [1, 0])
+    |> Nx.vectorize(:window)
+    |> Nx.abs()
+    |> then(&Nx.sqrt(Nx.sum(Nx.multiply(&1, &1))))
+    |> Nx.divide(512)
+
   data =
     res
     |> Nx.abs()
+    |> Nx.multiply(energy)
     |> Nx.add(Nx.Constants.epsilon(:f32))
     |> Nx.log()
     |> Nx.slice([0], [256])
