@@ -1098,12 +1098,12 @@ hann = Hann.window(size: freq_bins, cyclic: true) |> Nx.reshape({freq_bins, 1})
 hann_power = Nx.mean(Nx.multiply(hann, hann))
 
 impulses =
-  for {f, energy, thres} <- fundamentals do
+  for {f, energy, _thres} <- fundamentals do
     Nx.iota({freq_bins, 1})
-    |> Nx.remainder(Nx.vectorize(f, :window))
+    |> Nx.remainder(Nx.vectorize(Nx.multiply(f, 1), :window))
     |> Nx.equal(0)
     |> Nx.real()
-    |> Nx.multiply(Nx.vectorize(thres, :window))
+   # |> Nx.multiply(Nx.vectorize(thres, :window))
     |> Nx.multiply(Nx.sqrt(Nx.vectorize(energy, :window)))
     |> Nx.devectorize()
     |> Nx.squeeze(axes: [-1])
@@ -1205,6 +1205,7 @@ impulses_harmonics_spec
 |> Enum.map(&Nx.abs(&1))
 |> Enum.map(&Nx.add(&1, Nx.Constants.epsilon(:f32)))
 |> Enum.map(&Nx.log(&1))
+|> Enum.map(&Nx.divide(&1, 110))
 |> Enum.map(&Nx.devectorize(&1))
 |> Enum.map(&Nx.slice_along_axis(&1, 256, 256, axis: 1))
 |> Enum.map(&Nx.transpose(&1, axes: [1, 0]))
@@ -1215,7 +1216,7 @@ impulses_harmonics_spec
   titel: "Masked Spectra of Voiced Segments",
   show_meta: false,
   labels: ["Speech 1", "Speech 2", "Reconstructed Harmonics 1", "Reconstructed Harmonics 2"],
-  cmap: "inferno",
+  cmap: "viridis",
   x_axis: "window / time",
   y_axis: "frequency"
 )
