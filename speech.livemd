@@ -878,12 +878,15 @@ freq_bins = 512
 hann = Hann.window(size: freq_bins, cyclic: true) |> Nx.reshape({freq_bins, 1})
 
 impulses =
-  for {f, _, thres} <- fundamentals do
+  for {f, energy, thres} <- fundamentals do
     Nx.iota({freq_bins, 1})
-    |> Nx.add(div(freq_bins, 2))
+    |> Nx.add(1)
     |> Nx.remainder(Nx.vectorize(f, :window))
     |> Nx.equal(0)
+    |> Nx.ifft()
+    |> Nx.real()
     |> Nx.multiply(Nx.vectorize(thres, :window))
+    |> Nx.multiply(Nx.sqrt(Nx.vectorize(energy, :window)))
     |> Nx.devectorize()
     |> Nx.squeeze(axes: [-1])
   end
@@ -938,7 +941,7 @@ for {{impulse, impulse_hann}, {title, _speech, sr}} <-
   |> VegaLite.encode_field(:y, "y",
     type: :quantitative,
     axis: [title: "Amplitude"],
-    scale: [domain: [0, 1]]
+    scale: [domain: [-1, 1]]
   )
   |> VegaLite.encode_field(:color, "color", type: :nominal, scale: [range: ["blue", "pink"]])
   |> VegaLite.transform(filter: "datum.window == window ")
@@ -957,9 +960,21 @@ end
 ```
 
 ```elixir
+preempted =
+  for windows <- speeches_windows do
+    windows
+    |> Nx.new_axis(1)
+    |> Nx.conv(Nx.tensor([[[-0.95, 1]]]), padding: :same)
+    |> Nx.squeeze(axes: [1])
+  end
+
+Kino.nothing()
+```
+
+```elixir
 reconstructed_fundamentals =
   for win <-
-        Enum.concat(speeches_windows, impulses) do
+        Enum.concat([speeches_windows, impulses, preempted]) do
     pairs =
       win
       |> Nx.devectorize(keep_names: false)
@@ -989,6 +1004,8 @@ reconstructed_fundamentals =
 |> Enum.concat(reconstructed_fundamentals)
 |> KinoPhonograph.WavePlot.plot(
   labels: [
+    "speech 1 original",
+    "speech 2 original",
     "speech 1 reconstruction from spectogram",
     "speech 2 reconstruction from spectogram",
     "speech 1 fundamental reconstruction",
@@ -1012,7 +1029,7 @@ reconstructed_fundamentals =
 
 ```elixir
 [speech1, speech2]
-|> Enum.concat(reconstructed_fundamentals)
+|> Enum.concat(reconstructed_fundamentals |> Enum.map(&Nx.concatenate([Nx.multiply(&1, 3), &1])))
 |> Enum.concat([Nx.concatenate([speech1[[.., 0..44400]], speech2[[.., 0..44400]]], axis: 0)])
 |> KinoPhonograph.Player.new(
   sample_rate: 16000,
@@ -1023,7 +1040,128 @@ reconstructed_fundamentals =
     "Reconstructed 2",
     "Fundamental 1",
     "Fundamental2",
+    "Preemphasis 1",
+    "Preemphasis 2",
     "Stereo Composition"
   ]
 )
+```
+
+```elixir
+for {windows, {title, _speech, sr}} <- speeches_windows |> Enum.zip(speeches) do
+  winsize = Nx.axis_size(windows, 1)
+  hann = Hann.window(size: winsize)
+
+  premp =
+    windows
+    |> Nx.new_axis(1)
+    |> Nx.conv(Nx.tensor([[[-0.95, 1]]]), padding: :same)
+    |> Nx.squeeze(axes: [1])
+    |> Nx.multiply(hann)
+    |> Nx.to_list()
+
+  damped = premp
+
+  data =
+    windows
+    |> Nx.to_list()
+    |> Enum.zip(damped)
+    |> Enum.with_index()
+    |> Enum.flat_map(fn {{window, dwin}, w} ->
+      window
+      |> Enum.zip(dwin)
+      |> Enum.with_index()
+      |> Enum.flat_map(fn {{a, b}, c} ->
+        [
+          %{
+            x: (w * 512 / 2 + c) / sr,
+            y: a,
+            window: w,
+            color: "original"
+          },
+          %{
+            x: (w * 512 / 2 + c) / sr,
+            y: b,
+            window: w,
+            color: "hann-scaled"
+          }
+        ]
+      end)
+    end)
+
+  VegaLite.new(
+    width: 600,
+    title: "Spectrum of Window Slice: #{title}"
+  )
+  |> VegaLite.data_from_values(data)
+  |> VegaLite.mark(:line)
+  |> VegaLite.encode_field(:color, "color", type: :nominal, scale: [range: ["red", "blue"]])
+  |> VegaLite.encode_field(:x, "x",
+    type: :quantitative,
+    axis: [title: "Time (s)", nice: false],
+    scale: [nice: false, round: false]
+  )
+  |> VegaLite.encode_field(:y, "y",
+    type: :quantitative,
+    scale: [domain: [-0.1, 0.1]],
+    axis: [title: "Amplitude"]
+  )
+  |> VegaLite.transform(filter: "datum.window == window ")
+end
+|> then(&VegaLite.concat(VegaLite.new(title: "Spectra"), &1, :vertical))
+|> VegaLite.param("window",
+  value: 0,
+  bind: [
+    name: "Window",
+    input: :range,
+    min: 0,
+    max: Enum.map(speeches_windows, &(Nx.to_number(Nx.axis_size(&1, 0)) - 1)) |> Enum.min(),
+    step: 1
+  ]
+)
+```
+
+```elixir
+m = 11
+
+for pre <- preempted do
+  corr =
+    pre
+    |> Nx.new_axis(0)
+    |> Nx.new_axis(0)
+    |> then(&Nx.conv(&1, &1, padding: :same))
+    |> Nx.squeeze(axes: [0, 1])
+    |> Nx.vectorize(:window)
+
+  phi = Nx.slice(corr, [0], [m])
+  phi2 = Nx.slice(corr, [1], [m])
+
+  # build Toeplitz matrix from first column (-phi) and first row (-phi)
+  col = Nx.negate(phi)
+  row = Nx.negate(phi)
+
+  toep =
+    Nx.stack(
+      for i <- 0..(m - 1) do
+        Nx.stack(
+          for j <- 0..(m - 1) do
+            if i >= j do
+              Nx.slice(col, [i - j], [1])
+            else
+              Nx.slice(row, [j - i], [1])
+            end
+          end
+        )
+      end
+    )
+    |> Nx.squeeze(axes: [-1])
+
+  rhs =
+    phi2
+    |> Nx.negate()
+
+  Nx.LinAlg.solve(toep, rhs) |> dbg
+end
+
+Kino.nothing()
 ```
