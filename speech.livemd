@@ -1122,46 +1122,155 @@ end
 ```
 
 ```elixir
-m = 11
+defmodule Freqz do
+  import Nx.Defn
 
-for pre <- preempted do
-  corr =
-    pre
-    |> Nx.new_axis(0)
-    |> Nx.new_axis(0)
-    |> then(&Nx.conv(&1, &1, padding: :same))
-    |> Nx.squeeze(axes: [0, 1])
-    |> Nx.vectorize(:window)
+  defn freqz(a, opts \\ []) do
+    opts = keyword!(opts, [:n, :fs])
+    worN = opts[:n]
+    fs = opts[:fs]
+    a = Nx.concatenate([Nx.tensor([1.0]), a])
 
-  phi = Nx.slice(corr, [0], [m])
-  phi2 = Nx.slice(corr, [1], [m])
+    w =
+      Nx.linspace(0.0, 2.0 * Nx.Constants.pi(), n: worN)
 
-  # build Toeplitz matrix from first column (-phi) and first row (-phi)
-  col = Nx.negate(phi)
-  row = Nx.negate(phi)
+    n = Nx.axis_size(a, 0)
 
-  toep =
-    Nx.stack(
-      for i <- 0..(m - 1) do
-        Nx.stack(
-          for j <- 0..(m - 1) do
-            if i >= j do
-              Nx.slice(col, [i - j], [1])
-            else
-              Nx.slice(row, [j - i], [1])
-            end
-          end
+    k = Nx.iota({n})
+
+    w_col = Nx.reshape(w, {worN, 1})
+    k_row = Nx.reshape(k, {1, n})
+
+    j = Nx.complex(0.0, 1.0)
+
+    exp_matrix =
+      Nx.exp(
+        Nx.multiply(
+          Nx.multiply(-j, w_col),
+          k_row
         )
-      end
-    )
-    |> Nx.squeeze(axes: [-1])
+      )
 
-  rhs =
-    phi2
-    |> Nx.negate()
+    h = Nx.dot(exp_matrix, a)
 
-  Nx.LinAlg.solve(toep, rhs) |> dbg
+    freqs =
+      Nx.multiply(w, fs / (2.0 * Nx.Constants.pi()))
+
+    {freqs, h}
+  end
 end
+```
+
+```elixir
+m = 11
+sr_hz = 16000
+
+responses =
+  for pre <- preempted do
+    corr =
+      pre
+      |> Nx.new_axis(0)
+      |> Nx.new_axis(0)
+      |> then(&Nx.conv(&1, &1, padding: :same))
+      |> Nx.squeeze(axes: [0, 1])
+      |> Nx.vectorize(:window)
+
+    phi = Nx.slice(corr, [0], [m])
+    phi2 = Nx.slice(corr, [1], [m])
+
+    # build Toeplitz matrix from first column (-phi) and first row (-phi)
+    col = Nx.negate(phi)
+    row = Nx.negate(phi)
+
+    toep =
+      Nx.stack(
+        for i <- 0..(m - 1) do
+          Nx.stack(
+            for j <- 0..(m - 1) do
+              if i >= j do
+                Nx.slice(col, [i - j], [1])
+              else
+                Nx.slice(row, [j - i], [1])
+              end
+            end
+          )
+        end
+      )
+      |> Nx.squeeze(axes: [-1])
+
+    rhs =
+      phi2
+      |> Nx.negate()
+
+    a = Nx.LinAlg.solve(toep, rhs)
+
+    Freqz.freqz(a, n: 512, fs: 16000) |> dbg
+  end
 
 Kino.nothing()
+```
+
+```elixir
+for {{{freqs, res}, {title, _, fr}}, spec} <-
+      responses |> Enum.zip(speeches) |> Enum.zip(spectograms) do
+  data =
+    res
+    |> Nx.abs()
+    |> Nx.add(Nx.Constants.epsilon(:f32))
+    |> Nx.log()
+    |> Nx.slice([0], [256])
+    |> Nx.to_list()
+    |> Enum.with_index()
+    |> Enum.flat_map(fn {freqs, w} ->
+      for {a, c} <- freqs |> Enum.with_index() do
+        %{
+          x: c / 256 * fr * 0.5,
+          y: a / 10,
+          window: w,
+          type: "resp"
+        }
+      end
+    end)
+    |> Enum.concat(
+      spec[0]
+      |> Nx.to_list()
+      |> Enum.with_index()
+      |> Enum.flat_map(fn {freqs, w} ->
+        for {a, c} <- freqs |> Enum.with_index() do
+          %{
+            x: (1 - w / 256) * fr * 0.5,
+            y: a,
+            window: c,
+            type: "orig"
+          }
+        end
+      end)
+    )
+
+  VegaLite.new(
+    width: 700,
+    title: "Spectrum of Window Slice: #{title}"
+  )
+  |> VegaLite.data_from_values(data)
+  |> VegaLite.mark(:line)
+  |> VegaLite.encode_field(:color, "type", type: :nominal, axis: [title: "Type"])
+  |> VegaLite.encode_field(:x, "x", type: :quantitative, axis: [title: "Freq (hz)"])
+  |> VegaLite.encode_field(:y, "y",
+    type: :quantitative,
+    scale: [domain: [-1.5, 1]],
+    axis: [title: "Magnitude"]
+  )
+  |> VegaLite.transform(filter: "datum.window == window")
+end
+|> then(&VegaLite.concat(VegaLite.new(title: "Spectra"), &1, :vertical))
+|> VegaLite.param("window",
+  value: 0,
+  bind: [
+    name: "Window",
+    input: :range,
+    min: 0,
+    max: Enum.map(spectograms, &(Nx.to_number(Nx.axis_size(&1, 2)) - 1)) |> Enum.min(),
+    step: 1
+  ]
+)
 ```
