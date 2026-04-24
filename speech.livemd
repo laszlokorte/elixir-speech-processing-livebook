@@ -691,6 +691,16 @@ spectograms =
     |> Nx.multiply(Hann.window(size: freq_bins, cyclic: true))
     # apply fourier transform to each window
     |> Nx.fft()
+    # spectrum of real values signal is symmetric, discard one half 
+    |> Nx.slice_along_axis(bins_half, bins_half, axis: 1)
+    # transpose for plotting
+    |> Nx.transpose()
+    |> Nx.devectorize()
+  end
+
+log_spectograms =
+  for s <- spectograms do
+    s
     # discard phase information
     |> Nx.abs()
     # make sure values are non-zero
@@ -699,20 +709,23 @@ spectograms =
     |> Nx.log()
     # convert to deci bel
     |> Nx.divide(10)
-    # spectrum of real values signal is symmetric, discard one half 
-    |> Nx.slice_along_axis(bins_half, bins_half, axis: 1)
-    # transpose for plotting
-    |> Nx.transpose()
-    |> Nx.devectorize()
   end
 
-spectograms
+phase_spectograms =
+  for s <- spectograms do
+    s
+    # discard phase information
+    |> Nx.phase()
+  end
+
+log_spectograms
+|> Enum.concat(phase_spectograms)
 |> KinoZoetrope.TensorStack.new(
   size: 320,
   titel: "Magnitude Spectra",
   show_meta: false,
   labels: ["Speech 1", "Speech 2"],
-  cmap: "inferno",
+  cmaps: ["inferno", "inferno", "hsv", "hsv"],
   frame_label: "Fundamental",
   x_axis: "window / time",
   y_axis: "frequency",
@@ -806,7 +819,7 @@ end
 Next we can overlay the voiced/unvoiced detection with the spectogram from before me masking out all unvoiced windows. Notice the dark vertical bars and how the ripple pattern between them is still clearly visible.
 
 ```elixir
-spectograms
+log_spectograms
 |> Enum.zip_with(zero_crossings, fn s, z ->
   s
   |> Nx.multiply(Nx.less(z, 0.2) |> Nx.multiply(-0.8))
@@ -827,7 +840,7 @@ end)
 Instead of plotting a 2d colored spectogram we can also plot the spectrum for only a single window slice with a slider to select manually which window to plot:
 
 ```elixir
-for {spec, {title, _, fr}} <- spectograms |> Enum.zip(speeches) do
+for {spec, {title, _, fr}} <- log_spectograms |> Enum.zip(speeches) do
   data =
     spec[0]
     |> Nx.to_list()
@@ -912,7 +925,7 @@ Kino.nothing()
 ```
 
 ```elixir
-m = 12
+m = 32
 sr_hz = 16000
 
 responses =
@@ -966,22 +979,35 @@ Kino.nothing()
 responses
 |> Enum.map(&elem(&1, 1))
 |> Enum.map(&Nx.abs(&1))
+|> Enum.map(&Nx.add(&1, Nx.Constants.epsilon(:f32)))
 |> Enum.map(&Nx.log(&1))
+|> Enum.map(&Nx.divide(&1, 10))
 |> Enum.map(&Nx.devectorize(&1))
 |> Enum.map(&Nx.slice_along_axis(&1, 256, 256, axis: 1))
 |> Enum.map(&Nx.transpose(&1, axes: [1, 0]))
 |> Enum.map(&Nx.new_axis(&1, 0))
-|> then(&Enum.concat(spectograms, &1))
+|> Enum.concat(
+  responses
+  |> Enum.map(&elem(&1, 1))
+  |> Enum.map(&Nx.phase(&1))
+  |> Enum.map(&Nx.devectorize(&1))
+  |> Enum.map(&Nx.slice_along_axis(&1, 256, 256, axis: 1))
+  |> Enum.map(&Nx.transpose(&1, axes: [1, 0]))
+  |> Enum.map(&Nx.new_axis(&1, 0))
+)
+|> then(&Enum.concat(log_spectograms, &1))
 |> KinoZoetrope.TensorStack.new(
   size: 320,
   titel: "Masked Spectra of Voiced Segments",
   show_meta: false,
   labels: ["Speech 1", "Speech 2", "Reconstructed Harmonics 1", "Reconstructed Harmonics 2"],
-  cmap: "inferno",
+  cmaps: ["inferno", "inferno", "inferno", "inferno", "hsv", "hsv"],
   x_axis: "window / time",
   y_axis: "frequency"
 )
 ```
+
+## Energy Estimation
 
 ```elixir
 energies =
@@ -1024,7 +1050,7 @@ end
 
 ```elixir
 for {{{{_freqs, res}, {title, _, fr}}, spec}, energy} <-
-      responses |> Enum.zip(speeches) |> Enum.zip(spectograms) |> Enum.zip(energies) do
+      responses |> Enum.zip(speeches) |> Enum.zip(log_spectograms) |> Enum.zip(energies) do
   data =
     res
     |> Nx.abs()
@@ -1098,31 +1124,111 @@ hann = Hann.window(size: freq_bins, cyclic: true) |> Nx.reshape({freq_bins, 1})
 hann_power = Nx.mean(Nx.multiply(hann, hann))
 
 impulses =
-  for {f, energy, _thres} <- fundamentals do
+  for {f, _energy, _thres} <- fundamentals do
     Nx.iota({freq_bins, 1})
     |> Nx.remainder(Nx.vectorize(Nx.multiply(f, 1), :window))
     |> Nx.equal(0)
     |> Nx.real()
-   # |> Nx.multiply(Nx.vectorize(thres, :window))
-    |> Nx.multiply(Nx.sqrt(Nx.vectorize(energy, :window)))
+    # |> Nx.multiply(Nx.vectorize(thres, :window))
     |> Nx.devectorize()
     |> Nx.squeeze(axes: [-1])
   end
 
-impulses_harmonics_spec =
-  for {imp, {_, res}} <- Enum.zip(impulses, responses) do
+for {impulse, {title, _speech, sr}, window} <-
+      Enum.zip([impulses, speeches, speeches_windows]) do
+  data =
+    Enum.zip([
+      impulse |> Nx.devectorize() |> Nx.to_list(),
+      window
+      |> then(&Nx.divide(&1, Nx.reduce_max(Nx.abs(&1))))
+      |> Nx.devectorize()
+      |> Nx.to_list()
+    ])
+    |> Enum.with_index()
+    |> Enum.flat_map(fn {{imp, orig}, w} ->
+      Enum.zip([imp, orig])
+      |> Enum.with_index()
+      |> Enum.flat_map(fn {{v, o}, t} ->
+        [
+          %{
+            x: (w * 512 / 2 + t) / sr,
+            y: v,
+            window: w,
+            color: "unscaled"
+          },
+          %{
+            x: (w * 512 / 2 + t) / sr,
+            y: o,
+            window: w,
+            color: "original"
+          }
+        ]
+      end)
+    end)
+
+  VegaLite.new(
+    width: 600,
+    title: "Fundamental Impulses: #{title}"
+  )
+  |> VegaLite.data_from_values(data)
+  |> VegaLite.mark(:line)
+  |> VegaLite.encode_field(:color, "color", type: :nominal)
+  |> VegaLite.encode_field(:x, "x",
+    type: :quantitative,
+    axis: [title: "Time (s)", nice: false],
+    scale: [nice: false, round: false]
+  )
+  |> VegaLite.encode_field(:y, "y",
+    type: :quantitative,
+    axis: [title: "Amplitude"],
+    scale: [domain: [-1, 1]]
+  )
+  |> VegaLite.transform(filter: "datum.window == window ")
+end
+|> then(&VegaLite.concat(VegaLite.new(title: "Spectra"), &1, :vertical))
+|> VegaLite.param("window",
+  value: 0,
+  bind: [
+    name: "Window",
+    input: :range,
+    min: 0,
+    max: Enum.map(speeches_windows, &(Nx.to_number(Nx.axis_size(&1, 0)) - 1)) |> Enum.min(),
+    step: 1
+  ]
+)
+```
+
+```elixir
+freq_bins = 512
+hann = Hann.window(size: freq_bins, cyclic: true) |> Nx.reshape({freq_bins, 1})
+hann_power = Nx.mean(Nx.multiply(hann, hann))
+
+impulses_damped =
+  Enum.zip_with(impulses, energies, fn i, e ->
+    Nx.multiply(Nx.vectorize(i, :window), e)
+  end)
+
+impulses_spec =
+  for {imp, {_, res}} <- Enum.zip(impulses_damped, responses) do
     imp
-    |> Nx.vectorize(:window)
     |> Nx.fft()
-    |> Nx.multiply(res)
+    |> Nx.multiply(Nx.subtract(1, Nx.flatten(hann)))
     |> Nx.real()
     |> Nx.devectorize()
   end
 
-impulses_harmonics =
-  for {imp, {_, res}} <- Enum.zip(impulses, responses) do
+impulses_harmonics_spec =
+  for {imp, {_, res}} <- Enum.zip(impulses_damped, responses) do
     imp
-    |> Nx.vectorize(:window)
+    |> Nx.multiply(Nx.flatten(hann))
+    |> Nx.fft()
+    |> Nx.multiply(res)
+    |> Nx.devectorize()
+  end
+
+impulses_harmonics =
+  for {imp, {_, res}} <- Enum.zip(impulses_damped, responses) do
+    imp
     |> Nx.fft()
     |> Nx.multiply(res)
     |> Nx.ifft()
@@ -1132,10 +1238,11 @@ impulses_harmonics =
 
 impulses_harmonics_hann =
   impulses_harmonics
-  |> Enum.map(&Nx.multiply(&1, Nx.flatten(hann)))
 
-for {{impulse, impulse_hann}, {title, _speech, sr}} <-
-      impulses |> Enum.zip(impulses_harmonics_hann) |> Enum.zip(speeches) do
+# |> Enum.map(&Nx.multiply(&1, Nx.flatten(hann)))
+
+for {impulse, impulse_hann, {title, _speech, sr}, windows} <-
+      Enum.zip([impulses_damped, impulses_harmonics_hann, speeches, speeches_windows]) do
   data =
     impulse
     |> Nx.devectorize()
@@ -1145,24 +1252,36 @@ for {{impulse, impulse_hann}, {title, _speech, sr}} <-
       |> Nx.devectorize()
       |> Nx.to_list()
     )
+    |> Enum.zip(
+      windows
+      |> Nx.devectorize()
+      |> Nx.to_list()
+    )
     |> Enum.with_index()
-    |> Enum.flat_map(fn {{f, fh}, w} ->
+    |> Enum.flat_map(fn {{{f, fh}, origs}, w} ->
       f
       |> Enum.zip(fh)
+      |> Enum.zip(origs)
       |> Enum.with_index()
-      |> Enum.flat_map(fn {{a, b}, t} ->
+      |> Enum.flat_map(fn {{{a, b}, ori}, t} ->
         [
           %{
             x: (w * 512 / 2 + t) / sr,
-            y: a,
+            y: if(a > 0, do: 0.1, else: 0),
             window: w,
-            color: "orig"
+            color: "unscaled"
           },
           %{
             x: (w * 512 / 2 + t) / sr,
             y: b,
             window: w,
             color: "hann"
+          },
+          %{
+            x: (w * 512 / 2 + t) / sr,
+            y: ori,
+            window: w,
+            color: "orig"
           }
         ]
       end)
@@ -1182,9 +1301,9 @@ for {{impulse, impulse_hann}, {title, _speech, sr}} <-
   |> VegaLite.encode_field(:y, "y",
     type: :quantitative,
     axis: [title: "Amplitude"],
-    scale: [domain: [-1, 1]]
+    scale: [domain: [-0.1, 0.1]]
   )
-  |> VegaLite.encode_field(:color, "color", type: :nominal, scale: [range: ["blue", "pink"]])
+  |> VegaLite.encode_field(:color, "color", type: :nominal)
   |> VegaLite.transform(filter: "datum.window == window ")
 end
 |> then(&VegaLite.concat(VegaLite.new(title: "Spectra"), &1, :vertical))
@@ -1201,21 +1320,38 @@ end
 ```
 
 ```elixir
-impulses_harmonics_spec
+responses
+|> Enum.map(&elem(&1, 1))
+|> Enum.concat(impulses_harmonics_spec)
+|> Enum.concat(impulses_spec)
 |> Enum.map(&Nx.abs(&1))
+|> Enum.map(&Nx.as_type(&1, {:f, 64}))
 |> Enum.map(&Nx.add(&1, Nx.Constants.epsilon(:f32)))
 |> Enum.map(&Nx.log(&1))
-|> Enum.map(&Nx.divide(&1, 110))
+|> Enum.map(&Nx.divide(&1, 10))
 |> Enum.map(&Nx.devectorize(&1))
 |> Enum.map(&Nx.slice_along_axis(&1, 256, 256, axis: 1))
 |> Enum.map(&Nx.transpose(&1, axes: [1, 0]))
 |> Enum.map(&Nx.new_axis(&1, 0))
-|> then(&Enum.concat(spectograms, &1))
+|> Enum.concat(
+  impulses_harmonics_spec
+  |> Enum.map(&Nx.phase(&1))
+  |> Enum.map(&Nx.devectorize(&1))
+  |> Enum.map(&Nx.slice_along_axis(&1, 256, 256, axis: 1))
+  |> Enum.map(&Nx.transpose(&1, axes: [1, 0]))
+  |> Enum.map(&Nx.new_axis(&1, 0))
+)
+|> then(&Enum.concat(log_spectograms, &1))
 |> KinoZoetrope.TensorStack.new(
   size: 300,
   titel: "Masked Spectra of Voiced Segments",
   show_meta: false,
-  labels: ["Speech 1", "Speech 2", "Reconstructed Harmonics 1", "Reconstructed Harmonics 2"],
+  labels: [
+    "Speech 1 Original",
+    "Speech 2 Original",
+    "Reconstructed Harmonics 1",
+    "Reconstructed Harmonics 2"
+  ],
   cmap: "viridis",
   x_axis: "window / time",
   y_axis: "frequency"
@@ -1237,19 +1373,15 @@ Kino.nothing()
 ```
 
 ```elixir
-for {windows, {title, _speech, sr}} <- speeches_windows |> Enum.zip(speeches) do
+for {windows, {title, _speech, sr}, premp} <-
+      Enum.zip([speeches_windows, speeches, preempted]) do
   winsize = Nx.axis_size(windows, 1)
   hann = Hann.window(size: winsize)
 
-  premp =
-    windows
-    |> Nx.new_axis(1)
-    |> Nx.conv(Nx.tensor([[[-0.95, 1]]]), padding: :same)
-    |> Nx.squeeze(axes: [1])
+  damped =
+    premp
     |> Nx.multiply(hann)
     |> Nx.to_list()
-
-  damped = premp
 
   data =
     windows
