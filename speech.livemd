@@ -4,13 +4,13 @@
 
 ```elixir
 Mix.install([
-  {:nx, "~> 0.11.0"},
-  {:kino_zoetrope, "~> 0.23.0"},
-  {:kino_rewind, "~> 0.1.0"},
-  {:exla, "~> 0.11.0"},
+  {:nx, "~> 0.12.0"},
+  {:kino_zoetrope, "~> 0.24.0"},
+  {:kino_rewind, "~> 0.2.0"},
+  {:exla, "~> 0.12.0"},
   {:kino, "~> 0.19.0"},
   {:kino_vega_lite, "~> 0.1.13"},
-  {:kino_phonograph, "~> 0.7.0"}
+  {:kino_phonograph, "~> 0.8.0"}
  # {:kino_phonograph, git: "https://github.com/laszlokorte/kino_phonograph"}
 ])
 ```
@@ -68,7 +68,7 @@ defmodule SimpleWavNx do
       channels: channels,
       sample_rate: sample_rate,
       bits_per_sample: bits_per_sample,
-      samples: tensor
+      samples: tensor |> Nx.backend_transfer()
     }
   end
 
@@ -331,6 +331,7 @@ speeches_windows =
 
     speech[0]
     |> Window.sliding_windows(size: winsize, stride: winsize |> div(2))
+    |> Nx.backend_transfer()
   end
 
 for {windows, {title, _speech, sr}} <- speeches_windows |> Enum.zip(speeches) do
@@ -1209,7 +1210,7 @@ impulses_damped =
   end)
 
 impulses_spec =
-  for {imp, {_, res}} <- Enum.zip(impulses_damped, responses) do
+  for imp <- impulses_damped do
     imp
     |> Nx.fft()
     |> Nx.multiply(Nx.subtract(1, Nx.flatten(hann)))
