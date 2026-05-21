@@ -68,7 +68,7 @@ defmodule SimpleWavNx do
       channels: channels,
       sample_rate: sample_rate,
       bits_per_sample: bits_per_sample,
-      samples: tensor |> Nx.backend_transfer()
+      samples: tensor
     }
   end
 
@@ -148,7 +148,7 @@ Kino.nothing()
 
 ## Loading examples
 
-At its core audio signals are 1-dimensional arrays of numeric sample values. 
+At its core audio signals are 1-dimensional arrays of numeric sample values.
 Each sample value represents the measured (positive or negative relative to a reference value) air pressure at a point in time. Depending on the use case and quality of the recording 16000 or up to 48000 sample values per second are required to capture and reproduce the humanly perceived sound faithfully.
 The number of recorded samples per second is called sampling rate (sr) and needs to carried around as unit of measurement along the the raw sample values.
 
@@ -188,7 +188,7 @@ But we can *zoom in* by slicing a shorter sub sequence of samples from the audio
 
 # plot 4 signals
 [
-  # the full speech1 signal 
+  # the full speech1 signal
   speech1,
   # the full speech2 signal
   speech2,
@@ -331,7 +331,6 @@ speeches_windows =
 
     speech[0]
     |> Window.sliding_windows(size: winsize, stride: winsize |> div(2))
-    |> Nx.backend_transfer()
   end
 
 for {windows, {title, _speech, sr}} <- speeches_windows |> Enum.zip(speeches) do
@@ -551,7 +550,7 @@ fundamentals =
       |> Window.sliding_windows(size: winsize, stride: winsize |> div(2))
       # process each window on its own
       |> Nx.vectorize(:windows)
-      # weight window with Hann 
+      # weight window with Hann
       |> Nx.multiply(Hann.window(size: winsize, cyclic: true))
       # introduce extra axes required to to Nx convolution
       |> Nx.new_axis(0)
@@ -637,7 +636,7 @@ spectograms =
     |> Window.sliding_windows(size: winsize, stride: winsize |> div(2))
     # process each window on its own
     |> Nx.vectorize(:windows)
-    # weight window with Hann 
+    # weight window with Hann
     # introduce extra axes required to to Nx convolution
     |> Nx.new_axis(0)
     |> Nx.new_axis(0)
@@ -692,7 +691,7 @@ spectograms =
     |> Nx.multiply(Hann.window(size: freq_bins, cyclic: true))
     # apply fourier transform to each window
     |> Nx.fft()
-    # spectrum of real values signal is symmetric, discard one half 
+    # spectrum of real values signal is symmetric, discard one half
     |> Nx.slice_along_axis(bins_half, bins_half, axis: 1)
     # transpose for plotting
     |> Nx.transpose()
