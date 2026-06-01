@@ -5,12 +5,12 @@
 ```elixir
 Mix.install([
   {:nx, "~> 0.12.0"},
-  {:kino_zoetrope, "~> 0.24.0"},
-  {:kino_rewind, "~> 0.2.0"},
+  {:kino_zoetrope, "~> 0.25.0"},
+  {:kino_rewind, "~> 0.3.0"},
   {:exla, "~> 0.12.0"},
   {:kino, "~> 0.19.0"},
   {:kino_vega_lite, "~> 0.1.13"},
-  {:kino_phonograph, "~> 0.8.0"}
+  {:kino_phonograph, "~> 0.9.0"}
  # {:kino_phonograph, git: "https://github.com/laszlokorte/kino_phonograph"}
 ])
 ```
@@ -206,7 +206,7 @@ But we can *zoom in* by slicing a shorter sub sequence of samples from the audio
     "speech 1 slice (#{slice1_start}-#{slice1_end})",
     "speech 2 slice (#{slice2_start}-#{slice2_end})"
   ],
-  titel: "Waveforms",
+  title: "Waveforms",
   width: 380,
   x_axis: "time",
   y_axis: "amplitude",
@@ -276,7 +276,7 @@ Multi-channel audio signals can also be plotted.
   labels: [
     "Multi channel audio"
   ],
-  titel: "Waveforms",
+  title: "Waveforms",
   width: 380,
   x_axis: "time",
   y_axis: "amplitude",
@@ -656,7 +656,7 @@ spectograms =
 
 spectograms
 |> KinoZoetrope.TensorStack.new(
-  titel: "Auto-Correlation across windows",
+  title: "Auto-Correlation across windows",
   show_meta: false,
   size: 330,
   labels: ["Speech 1", "Speech 2"],
@@ -722,7 +722,7 @@ log_spectograms
 |> Enum.concat(phase_spectograms)
 |> KinoZoetrope.TensorStack.new(
   size: 320,
-  titel: "Magnitude Spectra",
+  title: "Magnitude Spectra",
   show_meta: false,
   labels: ["Speech 1", "Speech 2"],
   cmaps: ["inferno", "inferno", "hsv", "hsv"],
@@ -826,7 +826,7 @@ log_spectograms
 end)
 |> KinoZoetrope.TensorStack.new(
   size: 320,
-  titel: "Masked Spectra of Voiced Segments",
+  title: "Masked Spectra of Voiced Segments",
   show_meta: false,
   labels: ["Speech 1", "Speech 2"],
   cmap: "inferno",
@@ -998,7 +998,7 @@ responses
 |> then(&Enum.concat(log_spectograms, &1))
 |> KinoZoetrope.TensorStack.new(
   size: 320,
-  titel: "Masked Spectra of Voiced Segments",
+  title: "Masked Spectra of Voiced Segments",
   show_meta: false,
   labels: ["Speech 1", "Speech 2", "Reconstructed Harmonics 1", "Reconstructed Harmonics 2"],
   cmaps: ["inferno", "inferno", "inferno", "inferno", "hsv", "hsv"],
@@ -1344,7 +1344,7 @@ responses
 |> then(&Enum.concat(log_spectograms, &1))
 |> KinoZoetrope.TensorStack.new(
   size: 300,
-  titel: "Masked Spectra of Voiced Segments",
+  title: "Masked Spectra of Voiced Segments",
   show_meta: false,
   labels: [
     "Speech 1 Original",
@@ -1486,7 +1486,7 @@ reconstructed_fundamentals =
     "Pre-emphasis 1",
     "Pre-emphasis 2"
   ],
-  titel: "Waveforms",
+  title: "Waveforms",
   width: 380,
   x_axis: "time",
   y_axis: "amplitude",
